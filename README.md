@@ -50,16 +50,25 @@ Adding a third backend means implementing `Provider` and wiring one match arm in
 curl -fsSL https://raw.githubusercontent.com/zdql/gamechat/main/install.sh | sh
 ```
 
-The installer downloads the right prebuilt binary for your platform from the latest GitHub release and drops it in `~/.local/bin/gamechat`. The first release tarball gets built automatically by `.github/workflows/release.yml` when you push a `v*` tag.
+Pulls the latest prebuilt binary for your platform from [GitHub Releases] and drops it in `~/.local/bin/gamechat`. Supported platforms: `darwin-arm64`, `darwin-x86_64`, `linux-x86_64`, `linux-arm64`.
+
+If `~/.local/bin` isn't on your `PATH`, the installer prints the line to add to your shell profile.
+
+**Pin a version or change install location:**
+
+```sh
+GAMECHAT_VERSION=v0.1.0 INSTALL_DIR=/usr/local/bin \
+  sh -c "$(curl -fsSL https://raw.githubusercontent.com/zdql/gamechat/main/install.sh)"
+```
 
 ### From source
 
 ```sh
-git clone <repo-url> gamechat && cd gamechat
+git clone https://github.com/zdql/gamechat.git && cd gamechat
 cargo install --path .
 ```
 
-Requires Rust 1.87+.
+Requires Rust 1.87+. Linux additionally needs `libasound2-dev` (and `pkg-config`) for `cpal`.
 
 ## Prerequisites
 
@@ -69,7 +78,7 @@ Requires Rust 1.87+.
   - [Codex CLI] (`codex`) — pass `--provider codex`.
 - Microphone + speakers.
 
-A `.env` file in the current or any parent directory is loaded automatically.
+A `.env` file in the current or any parent directory is loaded automatically — drop `OPENAI_API_KEY=sk-...` in there and you're done.
 
 ## Usage
 
@@ -127,3 +136,4 @@ MIT.
 [Claude Code]: https://github.com/anthropics/claude-code
 [Codex]: https://github.com/openai/codex
 [Codex CLI]: https://github.com/openai/codex
+[GitHub Releases]: https://github.com/zdql/gamechat/releases

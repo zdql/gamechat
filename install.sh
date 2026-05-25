@@ -62,8 +62,14 @@ fetch "$url" "$tmp/$asset"
 
 tar -xzf "$tmp/$asset" -C "$tmp"
 
+bin_path=$(find "$tmp" -type f -name gamechat -perm -u+x | head -n 1)
+if [ -z "$bin_path" ]; then
+  echo "gamechat: extracted archive did not contain a gamechat binary" >&2
+  exit 1
+fi
+
 mkdir -p "$INSTALL_DIR"
-install -m 0755 "$tmp/gamechat" "$INSTALL_DIR/gamechat"
+install -m 0755 "$bin_path" "$INSTALL_DIR/gamechat"
 
 echo "gamechat: installed to $INSTALL_DIR/gamechat"
 
