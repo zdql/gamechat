@@ -13,7 +13,7 @@
 
 set -eu
 
-REPO="${GAMECHAT_REPO:-gamechat/gamechat}"
+REPO="${GAMECHAT_REPO:-zdql/gamechat}"
 VERSION="${GAMECHAT_VERSION:-latest}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 

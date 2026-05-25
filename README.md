@@ -47,10 +47,10 @@ Adding a third backend means implementing `Provider` and wiring one match arm in
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/<owner>/gamechat/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/zdql/gamechat/main/install.sh | sh
 ```
 
-(Replace `<owner>` once the repo is pushed.) The installer downloads the right prebuilt binary for your platform from the latest GitHub release and drops it in `~/.local/bin/gamechat`.
+The installer downloads the right prebuilt binary for your platform from the latest GitHub release and drops it in `~/.local/bin/gamechat`. The first release tarball gets built automatically by `.github/workflows/release.yml` when you push a `v*` tag.
 
 ### From source
 
