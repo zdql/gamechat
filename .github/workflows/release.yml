@@ -24,7 +24,7 @@ jobs:
           - os: macos-14          # Apple Silicon
             target: aarch64-apple-darwin
             asset_target: darwin-arm64
-          - os: macos-13          # Intel
+          - os: macos-14          # cross-compile to Intel from Apple Silicon
             target: x86_64-apple-darwin
             asset_target: darwin-x86_64
           - os: ubuntu-22.04
