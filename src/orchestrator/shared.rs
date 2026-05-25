@@ -4,7 +4,6 @@
 //! string trimming, and a generic "drain a child process stream" helper.
 
 use crate::orchestrator::progress::ProgressReporter;
-use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 
 /// Render a ` job=<id>` suffix when a job is in scope, else an empty string.
@@ -20,11 +19,6 @@ pub(crate) fn preview(value: &str) -> String {
         preview.push_str("...");
     }
     preview
-}
-
-/// Serialize a JSON value to a compact string, or a placeholder on failure.
-pub(crate) fn compact_json(value: &Value) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "<unserializable>".to_string())
 }
 
 /// Drain a child process stream line-by-line, mirroring each line to stderr

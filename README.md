@@ -52,6 +52,8 @@ curl -fsSL https://raw.githubusercontent.com/zdql/gamechat/main/install.sh | sh
 
 Pulls the latest prebuilt binary for your platform from [GitHub Releases] and drops it in `~/.local/bin/gamechat`. Supported platforms: `darwin-arm64`, `darwin-x86_64`, `linux-x86_64`, `linux-arm64`.
 
+The installer also prompts (hidden input) for your `OPENAI_API_KEY` and stores it at `~/.config/gamechat/env` (mode 0600). `gamechat` reads that file automatically from any working directory, so `gamechat --realtime` just works after install. Skip the prompt with `GAMECHAT_NO_PROMPT=1`.
+
 If `~/.local/bin` isn't on your `PATH`, the installer prints the line to add to your shell profile.
 
 **Pin a version or change install location:**
@@ -78,7 +80,7 @@ Requires Rust 1.87+. Linux additionally needs `libasound2-dev` (and `pkg-config`
   - [Codex CLI] (`codex`) — pass `--provider codex`.
 - Microphone + speakers.
 
-A `.env` file in the current or any parent directory is loaded automatically — drop `OPENAI_API_KEY=sk-...` in there and you're done.
+`gamechat` looks for env vars in three places, in order: the process environment, then a `.env` file in the current directory or any parent, then `$XDG_CONFIG_HOME/gamechat/env` (defaults to `~/.config/gamechat/env`). The installer writes that last file; per-project `.env`s override it. First match wins per variable.
 
 ## Usage
 

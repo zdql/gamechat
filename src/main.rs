@@ -28,8 +28,16 @@ async fn run() -> Result<(), String> {
     }
 
     if args.realtime {
-        let openai_api_key = std::env::var("OPENAI_API_KEY")
-            .map_err(|_| "OPENAI_API_KEY is required for --realtime".to_string())?;
+        let openai_api_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
+            let path = global_config_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "~/.config/gamechat/env".to_string());
+            format!(
+                "OPENAI_API_KEY is required for --realtime.\n\
+                 set it in your shell, or write it to {path}:\n  \
+                 echo 'OPENAI_API_KEY=sk-...' > {path}"
+            )
+        })?;
         let orchestrator_provider = build_orchestrator_provider(
             &args.provider,
             args.codex_bin,
@@ -242,30 +250,52 @@ fn sanitize_slug(value: &str) -> String {
 }
 
 fn load_dotenv() {
+    // 1. Walk up from cwd looking for a .env (per-project override).
     let mut dir = std::env::current_dir().ok();
     while let Some(d) = dir {
         let env_path = d.join(".env");
         if env_path.exists() {
-            if let Ok(contents) = std::fs::read_to_string(&env_path) {
-                for line in contents.lines() {
-                    let line = line.trim();
-                    if line.is_empty() || line.starts_with('#') {
-                        continue;
-                    }
-                    if let Some((key, val)) = line.split_once('=') {
-                        let key = key.trim();
-                        let val = val.trim().trim_matches('"').trim_matches('\'');
-                        if std::env::var(key).is_err() {
-                            // SAFETY: called once at startup before any worker tasks.
-                            unsafe {
-                                std::env::set_var(key, val);
-                            }
-                        }
-                    }
-                }
-            }
+            apply_env_file(&env_path);
             break;
         }
         dir = d.parent().map(|p| p.to_path_buf());
+    }
+
+    // 2. Fall back to the installer-written global config. apply_env_file
+    //    never overwrites an existing var, so the cwd .env wins.
+    if let Some(path) = global_config_path() {
+        if path.exists() {
+            apply_env_file(&path);
+        }
+    }
+}
+
+fn global_config_path() -> Option<std::path::PathBuf> {
+    let base = std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var("HOME").ok().map(|h| std::path::PathBuf::from(h).join(".config")))?;
+    Some(base.join("gamechat").join("env"))
+}
+
+fn apply_env_file(path: &std::path::Path) {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return;
+    };
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, val)) = line.split_once('=') {
+            let key = key.trim();
+            let val = val.trim().trim_matches('"').trim_matches('\'');
+            if std::env::var(key).is_err() {
+                // SAFETY: called once at startup before any worker tasks.
+                unsafe {
+                    std::env::set_var(key, val);
+                }
+            }
+        }
     }
 }
