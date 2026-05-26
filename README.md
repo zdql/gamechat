@@ -8,8 +8,9 @@ Voice-driven supervisor for [Claude Code] and [Codex]. You talk to a low-latency
                 │  tool: delegate_to_orchestrator(slug, intent, …)
                 │  tool: sub_agent_progress(slug)
                 ▼
-        OrchestratorJobManager
-                │  one worker task per slug, ordered within a slug,
+        OrchestratorJobManager ◀── unix socket ── gamechat inspect / tail / open
+                │  one worker task per slug,                 (other terminal)
+                │  ordered within a slug,
                 │  concurrent across slugs
                 ▼
         ┌───────┴────────┐
@@ -19,7 +20,7 @@ Voice-driven supervisor for [Claude Code] and [Codex]. You talk to a low-latency
 
 ## Architecture
 
-There is exactly **one realtime voice loop** and an **async worker pool** for background agent jobs. Those are the two halves of the binary.
+There is exactly **one realtime voice loop**, an **async worker pool** for background agent jobs, and a tiny **control plane** that exposes job state to other terminals. Three concerns, three modules.
 
 ### The voice loop (`src/voice_loop/`)
 
@@ -43,6 +44,10 @@ On startup it sends a `session.update` that registers two tools — `delegate_to
   - **`codex`** — spawns `codex exec` per send and tails its output back through the same `SendResult` shape.
 
 Adding a third backend means implementing `Provider` and wiring one match arm in `main.rs`. The voice loop doesn't know which agent is on the other end.
+
+### The control plane (`src/control/`)
+
+The realtime process binds a Unix domain socket at startup and serves a tiny JSON-over-newline protocol. A second `gamechat` invocation reconnects to that socket for `inspect`, `tail`, or `open`. The control module never touches the voice loop or the orchestrator internals — it depends only on `Arc<ProgressStore>`, so the live conversation is unaffected by inspection. See **Inspecting active sub-agents** below for the user-facing surface.
 
 ## Install
 
@@ -102,6 +107,14 @@ gamechat --once "summarize the last 5 commits" --slug summarize_commits
 
 # Dump the session.update JSON without connecting.
 gamechat --print-realtime-config
+
+# Drop a personality on top of the orchestrator instructions.
+gamechat --realtime --preset jarvis
+
+# From another terminal, while a realtime session is running:
+gamechat inspect                    # list every active sub-agent
+gamechat tail refactor_docs         # stream that slug's progress
+gamechat open refactor_docs         # print `claude --resume <id>` for that slug
 ```
 
 | Flag | Default | Description |
@@ -162,6 +175,27 @@ For something durable, write `~/.config/gamechat/settings.json`:
 
 Resolution order, highest to lowest: CLI flag → top-level `voice` / `persona` in settings → preset's value → built-in default. Custom presets override built-ins of the same name. The orchestrator-delegation instructions are always sent — personas are appended to that base, never replace it. Run `gamechat --preset jarvis --print-realtime-config` to see the exact `instructions` and `voice` that will be sent.
 
+## Inspecting active sub-agents
+
+While a `gamechat --realtime` session is running, open another terminal and ask it what's going on:
+
+```sh
+gamechat inspect                       # list every active sub-agent + status
+gamechat tail refactor_docs            # stream that slug's progress buffer
+gamechat open refactor_docs            # print `claude --resume <session_id>`
+gamechat open refactor_docs --launch   # macOS: pop a new Terminal window into Claude Code
+```
+
+| Subcommand | Purpose |
+|------------|---------|
+| `inspect` | Table view of every registered slug: provider, status, elapsed seconds, last message. |
+| `tail <slug>` | Polls the progress buffer at ~750 ms and prints any new entries until the job finishes. |
+| `open <slug>` | Prints `claude --resume <session_id>` for that slug. With `--launch` on macOS, pops the command into a fresh Terminal window via `osascript`. |
+
+Each subcommand accepts `--pid <PID>` or `--socket <PATH>` if multiple gamechat instances are running. `open` only works against the `claude` provider — codex has no documented resume flag, so `open <codex-slug>` errors out and points you at `tail` instead.
+
+Under the hood, the realtime process binds a Unix domain socket at `$TMPDIR/gamechat-$USER/$pid.sock` (or `$XDG_RUNTIME_DIR` on Linux) and serves a tiny JSON-over-newline protocol (one request per connection). The socket is auto-removed when gamechat exits cleanly; stale entries from crashes are GC'd on the next `inspect` based on `kill(pid, 0)` probes. All of this lives in `src/control/` — entirely separate from the voice loop and orchestrator, depending only on a read-only handle to `ProgressStore`.
+
 ## Repository layout
 
 ```
@@ -174,6 +208,12 @@ gamechat/
 │   │   ├── session.rs       # session.update JSON + tool defs
 │   │   ├── settings.rs      # voice/persona presets, settings.json loader
 │   │   └── audio.rs         # cpal input/output, resampling
+│   ├── control/             # `inspect`/`tail`/`open` — isolated control plane
+│   │   ├── mod.rs           # subcommand routing
+│   │   ├── protocol.rs      # JSON-over-UDS wire types
+│   │   ├── runtime_dir.rs   # socket directory discovery
+│   │   ├── server.rs        # in-process Unix socket listener
+│   │   └── client.rs        # subcommand implementations
 │   └── orchestrator/
 │       ├── interface.rs     # Provider / Session traits, public types
 │       ├── jobs.rs          # OrchestratorJobManager + per-slug workers

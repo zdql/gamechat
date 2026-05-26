@@ -31,8 +31,22 @@ pub(crate) struct RealtimeRunConfig {
 }
 
 pub(crate) async fn run_realtime_voice(config: RealtimeRunConfig) -> Result<(), String> {
+    let provider_name = config.orchestrator_provider.name();
     let orchestrator_jobs = OrchestratorJobManager::spawn(config.orchestrator_provider);
     let orchestrator_bridge = OrchestratorBridge::new();
+
+    // Best-effort: keep the realtime loop running even if the control socket
+    // fails to bind (read-only headless environments, etc).
+    let _control_handle = match crate::control::spawn_server(
+        orchestrator_jobs.progress_store(),
+        provider_name,
+    ) {
+        Ok(handle) => Some(handle),
+        Err(err) => {
+            eprintln!("control socket disabled: {err}");
+            None
+        }
+    };
 
     let playback = Arc::new(Mutex::new(PlaybackBuffer::new()));
     let (_output_stream, output_rate) = start_output_stream(Arc::clone(&playback))?;

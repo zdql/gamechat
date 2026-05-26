@@ -160,6 +160,9 @@ impl ClaudeClient {
             .map_err(|e| format!("claude output was not valid utf-8: {e}"))?;
         let (reply, session_id) = parse_claude_stream_output(&stdout_text);
         if let Some(session_id) = session_id {
+            if let Some(reporter) = progress.as_ref() {
+                reporter.set_session_id(&session_id);
+            }
             self.session_id = Some(session_id);
         }
         let reply = reply.unwrap_or(stdout_text);

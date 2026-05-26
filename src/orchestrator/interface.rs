@@ -103,6 +103,10 @@ impl OrchestratorProvider {
         }
     }
 
+    pub(crate) fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+
     pub(crate) async fn open_session(&self, slug: &str) -> Result<OrchestratorSession, String> {
         let session = self.inner.open_session(slug).await?;
         eprintln!(

@@ -1,7 +1,9 @@
+mod control;
 mod orchestrator;
 mod types;
 mod voice_loop;
 
+use control::{ControlSubcommand, ControlTarget};
 use orchestrator::OrchestratorProvider;
 use std::path::PathBuf;
 use types::{DelegateToOrchestratorArgs, VoiceUpdate};
@@ -17,6 +19,13 @@ async fn main() {
 
 async fn run() -> Result<(), String> {
     load_dotenv();
+
+    // Subcommand short-circuit: `gamechat inspect|tail|open …` route entirely
+    // through the control module and never touch the realtime flag plumbing.
+    if let Some((subcommand, target)) = parse_control_subcommand()? {
+        return control::run_cli(subcommand, target).await;
+    }
+
     let args = CliArgs::parse()?;
 
     if args.print_realtime_config {
@@ -202,6 +211,80 @@ fn next_value(args: &mut impl Iterator<Item = String>, name: &str) -> Result<Str
         .ok_or_else(|| format!("{name} requires a value"))
 }
 
+fn parse_control_subcommand() -> Result<Option<(ControlSubcommand, ControlTarget)>, String> {
+    let mut iter = std::env::args().skip(1);
+    let Some(first) = iter.next() else {
+        return Ok(None);
+    };
+    let subcommand_name = first.as_str();
+    if !matches!(subcommand_name, "inspect" | "tail" | "open") {
+        return Ok(None);
+    }
+    let mut positional: Vec<String> = Vec::new();
+    let mut target = ControlTarget::default();
+    let mut launch = false;
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--pid" => {
+                let value = next_value(&mut iter, "--pid")?;
+                let pid: u32 = value
+                    .parse()
+                    .map_err(|e| format!("--pid expected a number: {e}"))?;
+                target.pid = Some(pid);
+            }
+            "--socket" => {
+                target.socket = Some(PathBuf::from(next_value(&mut iter, "--socket")?));
+            }
+            "--launch" => launch = true,
+            "--help" | "-h" => return Err(control_usage()),
+            other if other.starts_with("--") => {
+                return Err(format!("unknown argument for {subcommand_name}: {other}"));
+            }
+            other => positional.push(other.to_string()),
+        }
+    }
+    let subcommand = match subcommand_name {
+        "inspect" => {
+            if !positional.is_empty() {
+                return Err(format!(
+                    "inspect takes no positional arguments, got: {}",
+                    positional.join(" ")
+                ));
+            }
+            ControlSubcommand::Inspect
+        }
+        "tail" => {
+            let slug = positional
+                .into_iter()
+                .next()
+                .ok_or_else(|| "tail requires a slug, e.g. `gamechat tail refactor_docs`".to_string())?;
+            ControlSubcommand::Tail { slug }
+        }
+        "open" => {
+            let slug = positional
+                .into_iter()
+                .next()
+                .ok_or_else(|| "open requires a slug, e.g. `gamechat open refactor_docs`".to_string())?;
+            ControlSubcommand::Open { slug, launch }
+        }
+        _ => unreachable!(),
+    };
+    Ok(Some((subcommand, target)))
+}
+
+fn control_usage() -> String {
+    "usage:
+  gamechat inspect [--pid N | --socket PATH]
+  gamechat tail <slug> [--pid N | --socket PATH]
+  gamechat open <slug> [--pid N | --socket PATH] [--launch]
+
+Inspect a running gamechat realtime session from another terminal. With no
+target flag the client connects to the only running gamechat instance and
+errors if more than one is present.
+"
+    .to_string()
+}
+
 fn build_orchestrator_provider(
     provider: &str,
     codex_bin: Option<String>,
@@ -223,6 +306,10 @@ fn usage() -> String {
   gamechat --realtime
   gamechat --once \"user asked for deeper work\"
   gamechat --print-realtime-config
+
+  gamechat inspect                    List active sub-agents in a running session.
+  gamechat tail <slug>                Stream a sub-agent's progress buffer.
+  gamechat open <slug> [--launch]     Print (or launch on macOS) the resume command.
 
 options:
   --realtime                      Start the live voice loop (mic + speakers).
