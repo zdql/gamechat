@@ -110,9 +110,47 @@ gamechat --print-realtime-config
 | `--once <msg>` | — | Single delegation; prints the `VoiceUpdate` JSON. |
 | `--provider <claude\|codex>` | `claude` | Background coding agent. |
 | `--model <id>` | `gpt-realtime-2` | Realtime voice model. |
+| `--preset <name>` | `default` | Voice/personality preset (see below). |
+| `--voice <name>` | preset's | Override voice (`alloy`, `ash`, `ballad`, `cedar`, `coral`, `echo`, `marin`, `sage`, `shimmer`, `verse`). |
+| `--settings <path>` | `~/.config/gamechat/settings.json` | Override the settings file. |
 | `--slug <slug>` | `default` | Background task slug (used with `--once`). |
 | `--claude-bin` / `--claude-model` | autodetect | Override the `claude` binary or its model. |
 | `--codex-bin` / `--codex-model` | autodetect | Override the `codex` binary or its model. |
+
+## Voice & personality
+
+Pick a built-in preset on the command line:
+
+```sh
+gamechat --realtime --preset jarvis
+gamechat --realtime --preset jarvis --voice ash    # keep persona, swap voice
+```
+
+Built-in presets:
+
+| Name | Voice | Persona |
+|------|-------|---------|
+| `default` | `marin` | None — bare orchestrator frontend. |
+| `jarvis` | `cedar` | Polite British AI butler à la Iron Man. |
+| `concise` | `sage` | Extremely terse. No preamble, no filler. |
+| `pirate` | `ash` | Swashbuckling pirate captain. |
+
+For something durable, write `~/.config/gamechat/settings.json`:
+
+```json
+{
+  "preset": "jarvis",
+  "voice": "cedar",
+  "presets": {
+    "coach": {
+      "voice": "verse",
+      "persona": "You are an energetic coach. Be encouraging and direct. Celebrate small wins."
+    }
+  }
+}
+```
+
+Resolution order, highest to lowest: CLI flag → top-level `voice` / `persona` in settings → preset's value → built-in default. Custom presets override built-ins of the same name. The orchestrator-delegation instructions are always sent — personas are appended to that base, never replace it. Run `gamechat --preset jarvis --print-realtime-config` to see the exact `instructions` and `voice` that will be sent.
 
 ## Repository layout
 
@@ -124,6 +162,7 @@ gamechat/
 │   ├── voice_loop/
 │   │   ├── mod.rs           # The select! loop
 │   │   ├── session.rs       # session.update JSON + tool defs
+│   │   ├── settings.rs      # voice/persona presets, settings.json loader
 │   │   └── audio.rs         # cpal input/output, resampling
 │   └── orchestrator/
 │       ├── interface.rs     # Provider / Session traits, public types
