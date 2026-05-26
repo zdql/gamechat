@@ -50,11 +50,11 @@ Adding a third backend means implementing `Provider` and wiring one match arm in
 curl -fsSL https://raw.githubusercontent.com/zdql/gamechat/main/install.sh | sh
 ```
 
-Pulls the latest prebuilt binary for your platform from [GitHub Releases] and drops it in `~/.local/bin/gamechat`. Supported platforms: `darwin-arm64`, `darwin-x86_64`, `linux-x86_64`, `linux-arm64`.
+Pulls the latest prebuilt binary for your platform from [GitHub Releases] and drops it in `~/.local/bin/gamechat`. Supported platforms: `darwin-arm64`, `darwin-x86_64`, `linux-x86_64`, `linux-arm64`. The installer verifies the SHA-256 published with each release before installing; bypass with `GAMECHAT_SKIP_CHECKSUM=1` (not recommended).
 
-The installer also prompts (hidden input) for your `OPENAI_API_KEY` and stores it at `~/.config/gamechat/env` (mode 0600). `gamechat` reads that file automatically from any working directory, so `gamechat --realtime` just works after install. Skip the prompt with `GAMECHAT_NO_PROMPT=1`.
+The installer also prompts (hidden input) for your `OPENAI_API_KEY` and stores it at `~/.config/gamechat/env` (mode 0600, single-quoted so it round-trips through `source`). `gamechat` reads that file automatically from any working directory, so `gamechat --realtime` just works after install. Skip the prompt with `GAMECHAT_NO_PROMPT=1`. When piped into a noninteractive shell with no key and no existing config, the installer prints a warning with the exact commands to set the key yourself.
 
-If `~/.local/bin` isn't on your `PATH`, the installer prints the line to add to your shell profile.
+If `~/.local/bin` isn't on your `PATH`, the installer prints the line to add to your shell profile. It also checks whether `claude` and `codex` are on `PATH` and warns if the backend you'll need is missing.
 
 **Pin a version or change install location:**
 
@@ -80,7 +80,13 @@ Requires Rust 1.87+. Linux additionally needs `libasound2-dev` (and `pkg-config`
   - [Codex CLI] (`codex`) — pass `--provider codex`.
 - Microphone + speakers.
 
-`gamechat` looks for env vars in three places, in order: the process environment, then a `.env` file in the current directory or any parent, then `$XDG_CONFIG_HOME/gamechat/env` (defaults to `~/.config/gamechat/env`). The installer writes that last file; per-project `.env`s override it. First match wins per variable.
+`gamechat` resolves each env var from the first source that defines it, in this priority order:
+
+1. the process environment (exported in your shell);
+2. the **first** `.env` file found by walking up from the current working directory (parents are searched until one is found, then the walk stops);
+3. `$XDG_CONFIG_HOME/gamechat/env` (defaults to `~/.config/gamechat/env`) — the file the installer writes.
+
+So a `.env` next to your project overrides the global file, and anything already exported in your shell overrides both. Values may be unquoted, double-quoted, or single-quoted; single-quoted values support the POSIX `'\''` literal-quote escape, which is what the installer emits.
 
 ## Usage
 
