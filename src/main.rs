@@ -3,7 +3,9 @@ mod types;
 mod voice_loop;
 
 use orchestrator::OrchestratorProvider;
+use std::path::PathBuf;
 use types::{DelegateToOrchestratorArgs, VoiceUpdate};
+use voice_loop::settings::Settings;
 
 #[tokio::main]
 async fn main() {
@@ -18,7 +20,9 @@ async fn run() -> Result<(), String> {
     let args = CliArgs::parse()?;
 
     if args.print_realtime_config {
-        let config = voice_loop::session_update_json();
+        let resolved = Settings::load_with_override(args.settings_path.as_deref())?
+            .resolve(args.voice.clone(), args.preset.clone())?;
+        let config = voice_loop::session_update_json_for(&args.model, &resolved);
         println!(
             "{}",
             serde_json::to_string_pretty(&config)
@@ -38,6 +42,8 @@ async fn run() -> Result<(), String> {
                  echo 'OPENAI_API_KEY=sk-...' > {path}"
             )
         })?;
+        let voice_settings = Settings::load_with_override(args.settings_path.as_deref())?
+            .resolve(args.voice.clone(), args.preset.clone())?;
         let orchestrator_provider = build_orchestrator_provider(
             &args.provider,
             args.codex_bin,
@@ -49,6 +55,7 @@ async fn run() -> Result<(), String> {
             openai_api_key,
             model: args.model,
             orchestrator_provider,
+            voice_settings,
         })
         .await?;
         return Ok(());
@@ -116,6 +123,9 @@ struct CliArgs {
     print_realtime_config: bool,
     realtime: bool,
     model: String,
+    preset: Option<String>,
+    voice: Option<String>,
+    settings_path: Option<PathBuf>,
 }
 
 impl CliArgs {
@@ -133,6 +143,9 @@ impl CliArgs {
         let mut print_realtime_config = false;
         let mut realtime = false;
         let mut model = "gpt-realtime-2".to_string();
+        let mut preset = None;
+        let mut voice = None;
+        let mut settings_path = None;
 
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -153,6 +166,11 @@ impl CliArgs {
                 "--print-realtime-config" => print_realtime_config = true,
                 "--realtime" => realtime = true,
                 "--model" => model = next_value(&mut args, "--model")?,
+                "--preset" => preset = Some(next_value(&mut args, "--preset")?),
+                "--voice" => voice = Some(next_value(&mut args, "--voice")?),
+                "--settings" => {
+                    settings_path = Some(PathBuf::from(next_value(&mut args, "--settings")?))
+                }
                 "--help" | "-h" => return Err(usage()),
                 other => return Err(format!("unknown argument: {other}\n\n{}", usage())),
             }
@@ -172,6 +190,9 @@ impl CliArgs {
             print_realtime_config,
             realtime,
             model,
+            preset,
+            voice,
+            settings_path,
         })
     }
 }
@@ -210,6 +231,11 @@ options:
 
   --provider <claude|codex>       Background coding agent. Defaults to claude.
   --model <model>                 Realtime voice model. Defaults to gpt-realtime-2.
+
+  --preset <name>                 Voice/personality preset (default, jarvis, concise, pirate, ...).
+  --voice <name>                  Override voice (alloy, ash, ballad, cedar, coral, echo,
+                                  marin, sage, shimmer, verse). Wins over preset + settings.
+  --settings <path>               Override settings file (default: ~/.config/gamechat/settings.json).
 
   --slug <slug>                   Background task slug. Defaults to default.
   --context <text>                Recent voice transcript / context (passed to the agent).

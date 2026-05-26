@@ -1,16 +1,16 @@
+use super::settings::ResolvedVoiceSettings;
 use serde_json::json;
 
-pub(crate) fn session_update_json() -> serde_json::Value {
-    session_update_json_for_model("gpt-realtime-2")
-}
-
-pub(super) fn session_update_json_for_model(model: &str) -> serde_json::Value {
+pub(crate) fn session_update_json_for(
+    model: &str,
+    settings: &ResolvedVoiceSettings,
+) -> serde_json::Value {
     json!({
         "type": "session.update",
         "session": {
             "type": "realtime",
             "model": model,
-            "instructions": "You are a realtime voice frontend. Keep the spoken conversation moving. When the user asks for work that benefits from deeper reasoning, tools, files, research, or multi-step execution, call delegate_to_orchestrator. Always include a stable snake_case slug that names what the background agent will do, such as refactor_docs. Reuse the same slug to continue that background conversation; use a new slug for unrelated work. If the user asks how background work is going, call sub_agent_progress with that slug and summarize the returned last_activity. Call sub_agent_progress sparingly: only when the user asks or when you need material to fill a silence, and never twice in a row within a few seconds. If the response has rate_limited=true, wait retry_after_seconds before calling again — use the cached last_activity in the meantime. Do not pretend the background work is done until the orchestrator returns an update or sub_agent_progress reports status=completed.",
+            "instructions": settings.instructions,
             "output_modalities": ["audio"],
             "audio": {
                 "input": {
@@ -27,7 +27,7 @@ pub(super) fn session_update_json_for_model(model: &str) -> serde_json::Value {
                         "type": "audio/pcm",
                         "rate": 24000
                     },
-                    "voice": "marin"
+                    "voice": settings.voice
                 }
             },
             "tools": [
@@ -95,7 +95,11 @@ mod tests {
 
     #[test]
     fn session_exposes_sub_agent_progress_tool() {
-        let config = session_update_json_for_model("test-model");
+        let settings = ResolvedVoiceSettings {
+            voice: "marin".to_string(),
+            instructions: "base".to_string(),
+        };
+        let config = session_update_json_for("test-model", &settings);
         let tools = config["session"]["tools"]
             .as_array()
             .expect("tools should be an array");
@@ -116,6 +120,23 @@ mod tests {
             progress_tool["parameters"]["properties"]
                 .get("window_size")
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn session_uses_resolved_voice_and_instructions() {
+        let settings = ResolvedVoiceSettings {
+            voice: "cedar".to_string(),
+            instructions: "custom instructions".to_string(),
+        };
+        let config = session_update_json_for("test-model", &settings);
+        assert_eq!(
+            config["session"]["audio"]["output"]["voice"].as_str(),
+            Some("cedar")
+        );
+        assert_eq!(
+            config["session"]["instructions"].as_str(),
+            Some("custom instructions")
         );
     }
 }

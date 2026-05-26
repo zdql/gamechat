@@ -1,11 +1,13 @@
 mod audio;
 mod session;
+pub(crate) mod settings;
 
 use crate::orchestrator::{OrchestratorBridge, OrchestratorJobManager, OrchestratorProvider};
 use audio::{
     AudioChunk, PlaybackBuffer, enqueue_audio_delta, i16_to_le_bytes, playback_depth_ms,
     resample_i16, start_input_stream, start_output_stream,
 };
+use settings::ResolvedVoiceSettings;
 use base64::Engine;
 use futures_util::{Sink, SinkExt, StreamExt};
 use serde_json::json;
@@ -19,12 +21,13 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 // Owns the live microphone/websocket/playback select loop. Orchestrator jobs are
 // visible here only as bridge events that produce Realtime API messages.
-pub(crate) use session::session_update_json;
+pub(crate) use session::session_update_json_for;
 
 pub(crate) struct RealtimeRunConfig {
     pub openai_api_key: String,
     pub model: String,
     pub orchestrator_provider: OrchestratorProvider,
+    pub voice_settings: ResolvedVoiceSettings,
 }
 
 pub(crate) async fn run_realtime_voice(config: RealtimeRunConfig) -> Result<(), String> {
@@ -39,6 +42,7 @@ pub(crate) async fn run_realtime_voice(config: RealtimeRunConfig) -> Result<(), 
     run_voice_loop(VoiceLoop {
         openai_api_key: config.openai_api_key,
         model: config.model,
+        voice_settings: config.voice_settings,
         mic_rx: &mut mic_rx,
         playback,
         output_rate,
@@ -51,6 +55,7 @@ pub(crate) async fn run_realtime_voice(config: RealtimeRunConfig) -> Result<(), 
 struct VoiceLoop<'a> {
     openai_api_key: String,
     model: String,
+    voice_settings: ResolvedVoiceSettings,
     mic_rx: &'a mut mpsc::UnboundedReceiver<AudioChunk>,
     playback: Arc<Mutex<PlaybackBuffer>>,
     output_rate: u32,
@@ -81,7 +86,7 @@ async fn run_voice_loop(mut state: VoiceLoop<'_>) -> Result<(), String> {
 
     write
         .send(Message::Text(
-            session::session_update_json_for_model(&state.model)
+            session::session_update_json_for(&state.model, &state.voice_settings)
                 .to_string()
                 .into(),
         ))
