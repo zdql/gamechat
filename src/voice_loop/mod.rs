@@ -2,7 +2,9 @@ mod audio;
 mod session;
 pub(crate) mod settings;
 
-use crate::orchestrator::{OrchestratorBridge, OrchestratorJobManager, OrchestratorProvider};
+use crate::orchestrator::{
+    OpenAiSummarizer, OrchestratorBridge, OrchestratorJobManager, OrchestratorProvider,
+};
 use audio::{
     AudioChunk, PlaybackBuffer, enqueue_audio_delta, i16_to_le_bytes, playback_depth_ms,
     resample_i16, start_input_stream, start_output_stream,
@@ -33,7 +35,21 @@ pub(crate) struct RealtimeRunConfig {
 pub(crate) async fn run_realtime_voice(config: RealtimeRunConfig) -> Result<(), String> {
     let provider_name = config.orchestrator_provider.name();
     let orchestrator_jobs = OrchestratorJobManager::spawn(config.orchestrator_provider);
-    let orchestrator_bridge = OrchestratorBridge::new();
+    let summarizer = Arc::new(OpenAiSummarizer::new(config.openai_api_key.clone(), None)?);
+    let orchestrator_bridge = OrchestratorBridge::new(summarizer);
+
+    // Best-effort: keep the realtime loop running even if the control socket
+    // fails to bind (read-only headless environments, etc).
+    let _control_handle = match crate::control::spawn_server(
+        orchestrator_jobs.progress_store(),
+        provider_name,
+    ) {
+        Ok(handle) => Some(handle),
+        Err(err) => {
+            eprintln!("control socket disabled: {err}");
+            None
+        }
+    };
 
     // Best-effort: keep the realtime loop running even if the control socket
     // fails to bind (read-only headless environments, etc).
@@ -156,7 +172,8 @@ async fn run_voice_loop(mut state: VoiceLoop<'_>) -> Result<(), String> {
                     &mut response_active,
                     Arc::clone(&state.playback),
                     state.output_rate,
-                )?;
+                )
+                .await?;
                 for event in events {
                     send_or_defer_realtime_event(
                         &mut write,
@@ -235,7 +252,7 @@ where
         .map_err(|e| format!("failed to send deferred response.create: {e}"))
 }
 
-fn handle_realtime_event(
+async fn handle_realtime_event(
     value: serde_json::Value,
     orchestrator_bridge: &mut OrchestratorBridge,
     orchestrator_jobs: &OrchestratorJobManager,
@@ -269,5 +286,7 @@ fn handle_realtime_event(
         }
         _ => {}
     }
-    orchestrator_bridge.handle_realtime_event(&value, orchestrator_jobs)
+    orchestrator_bridge
+        .handle_realtime_event(&value, orchestrator_jobs)
+        .await
 }
