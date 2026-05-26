@@ -126,14 +126,24 @@ gamechat --realtime --preset jarvis
 gamechat --realtime --preset jarvis --voice ash    # keep persona, swap voice
 ```
 
-Built-in presets:
+Mix and match — `--preset jarvis --voice ash` keeps the butler dialogue on a gravelly voice.
+
+
+Built-in presets — one zany persona per Realtime voice, plus a bare default and a useful `concise`:
 
 | Name | Voice | Persona |
 |------|-------|---------|
 | `default` | `marin` | None — bare orchestrator frontend. |
 | `jarvis` | `cedar` | Polite British AI butler à la Iron Man. |
 | `concise` | `sage` | Extremely terse. No preamble, no filler. |
-| `pirate` | `ash` | Swashbuckling pirate captain. |
+| `gameshow` | `alloy` | 1970s game show host — lightning round energy. |
+| `noir` | `ash` | Hardboiled 1940s film-noir detective. |
+| `bard` | `ballad` | Wandering medieval bard who rhymes when natural. |
+| `influencer` | `coral` | Overcaffeinated LA wellness influencer. |
+| `thespian` | `echo` | Classically trained Shakespearean actor. |
+| `monk` | `sage` | Deadpan zen monk — opens with a one-line koan. |
+| `diva` | `shimmer` | Broadway diva, perpetually mid-Act II climax. |
+| `sportscaster` | `verse` | Live play-by-play announcer narrating the agent. |
 
 For something durable, write `~/.config/gamechat/settings.json`:
 
