@@ -2,7 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Maximum number of progress entries retained per job.
 const MAX_BUFFER_ENTRIES: usize = 20;
@@ -17,7 +17,7 @@ pub(crate) const DEFAULT_WINDOW_SIZE: usize = 1000;
 
 // ── Public types ────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum JobStatus {
     Queued,
@@ -35,6 +35,31 @@ impl std::fmt::Display for JobStatus {
             Self::Failed => "failed",
         })
     }
+}
+
+/// Lightweight per-slug summary used by the control socket. Unlike
+/// [`ProgressSnapshot`], this never consumes the per-slug rate-limit window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SlugSummary {
+    pub slug: String,
+    pub provider: String,
+    pub status: JobStatus,
+    pub last_message: String,
+    pub elapsed_seconds: f64,
+    pub session_id: Option<String>,
+    /// Sequence number of the most recent buffered entry, or `None` if the
+    /// buffer is empty. Clients use this as the initial tail cursor.
+    pub last_seq: Option<u64>,
+}
+
+/// Batch returned by [`ProgressStore::entries_after`]: any newly-buffered
+/// entries together with the updated cursor.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct TailBatch {
+    pub entries: Vec<String>,
+    pub next_cursor: Option<u64>,
+    pub status: JobStatus,
+    pub done: bool,
 }
 
 /// Read-only snapshot returned to callers that query a job's progress.
@@ -71,6 +96,10 @@ impl ProgressReporter {
     pub(crate) fn push(&self, message: &str) {
         self.store.push_progress(&self.slug, message);
     }
+
+    pub(crate) fn set_session_id(&self, id: &str) {
+        self.store.set_session_id(&self.slug, id);
+    }
 }
 
 // ── Internal tracking ──────────────────────────────────────────────────
@@ -80,13 +109,21 @@ struct JobProgress {
     provider: String,
     /// The most recent single progress line (e.g. last agent reply).
     last_message: String,
-    /// Bounded ring of recent progress entries (newest last).
-    recent_buffer: VecDeque<String>,
+    /// Bounded ring of recent progress entries (newest last). Each carries a
+    /// monotonically increasing sequence number so cursor-based tail readers
+    /// can stream only new content.
+    recent_buffer: VecDeque<(u64, String)>,
+    /// Next sequence number to assign on `push_progress`.
+    next_seq: u64,
     last_updated: Instant,
     /// Wall-clock origin for `elapsed_seconds`. Set on `register_job` and
     /// re-stamped on `set_running` so the voice model gets time-in-flight
     /// rather than time-in-queue once the job actually starts.
     started_at: Instant,
+    /// Backend-reported conversation/session id (e.g. Claude Code's session
+    /// id), once known. Used by external inspection clients to resume the
+    /// underlying agent UI.
+    session_id: Option<String>,
 }
 
 struct ProgressInner {
@@ -121,8 +158,10 @@ impl ProgressStore {
                 provider: provider.to_string(),
                 last_message: String::new(),
                 recent_buffer: VecDeque::new(),
+                next_seq: 0,
                 last_updated: now,
                 started_at: now,
+                session_id: None,
             },
         );
     }
@@ -152,7 +191,9 @@ impl ProgressStore {
             if progress.recent_buffer.len() >= MAX_BUFFER_ENTRIES {
                 progress.recent_buffer.pop_front();
             }
-            progress.recent_buffer.push_back(trimmed.to_string());
+            let seq = progress.next_seq;
+            progress.next_seq = progress.next_seq.wrapping_add(1);
+            progress.recent_buffer.push_back((seq, trimmed.to_string()));
             progress.last_updated = Instant::now();
         }
     }
@@ -168,7 +209,9 @@ impl ProgressStore {
                 if progress.recent_buffer.len() >= MAX_BUFFER_ENTRIES {
                     progress.recent_buffer.pop_front();
                 }
-                progress.recent_buffer.push_back(trimmed.to_string());
+                let seq = progress.next_seq;
+                progress.next_seq = progress.next_seq.wrapping_add(1);
+                progress.recent_buffer.push_back((seq, trimmed.to_string()));
             }
             progress.last_updated = Instant::now();
         }
@@ -185,6 +228,64 @@ impl ProgressStore {
             }
             progress.last_updated = Instant::now();
         }
+    }
+
+    /// Attach (or update) the backend session id for a slug. Used by external
+    /// inspection clients to launch the underlying agent UI on the right
+    /// conversation.
+    pub fn set_session_id(&self, slug: &str, session_id: &str) {
+        let mut inner = self.inner.lock().expect("progress store mutex poisoned");
+        if let Some(progress) = inner.jobs.get_mut(slug) {
+            progress.session_id = Some(session_id.to_string());
+        }
+    }
+
+    /// Non-rate-limited summary of every known slug. Intended for the control
+    /// socket, not the voice model — does not consume the per-slug rate-limit
+    /// window.
+    pub fn snapshot_all(&self) -> Vec<SlugSummary> {
+        let inner = self.inner.lock().expect("progress store mutex poisoned");
+        let mut entries: Vec<SlugSummary> = inner
+            .jobs
+            .iter()
+            .map(|(slug, p)| SlugSummary {
+                slug: slug.clone(),
+                provider: p.provider.clone(),
+                status: p.status,
+                last_message: p.last_message.clone(),
+                elapsed_seconds: p.started_at.elapsed().as_secs_f64(),
+                session_id: p.session_id.clone(),
+                last_seq: p.recent_buffer.back().map(|(seq, _)| *seq),
+            })
+            .collect();
+        entries.sort_by(|a, b| a.slug.cmp(&b.slug));
+        entries
+    }
+
+    /// Return buffered entries whose sequence number is greater than
+    /// `after_seq`. `None` if the slug is unknown. The returned cursor is the
+    /// largest sequence number returned (or `after_seq` if nothing new).
+    pub fn entries_after(&self, slug: &str, after_seq: Option<u64>) -> Option<TailBatch> {
+        let inner = self.inner.lock().expect("progress store mutex poisoned");
+        let progress = inner.jobs.get(slug)?;
+        let mut entries: Vec<String> = Vec::new();
+        let mut max_seq = after_seq;
+        for (seq, msg) in &progress.recent_buffer {
+            let include = match after_seq {
+                Some(cursor) => *seq > cursor,
+                None => true,
+            };
+            if include {
+                entries.push(msg.clone());
+                max_seq = Some(max_seq.map_or(*seq, |existing| existing.max(*seq)));
+            }
+        }
+        Some(TailBatch {
+            entries,
+            next_cursor: max_seq,
+            status: progress.status,
+            done: matches!(progress.status, JobStatus::Completed | JobStatus::Failed),
+        })
     }
 
     /// Query the progress of a job. Returns `None` if the job is unknown.
@@ -238,7 +339,7 @@ impl ProgressStore {
 
 /// Concatenate buffer entries and truncate to `max_chars`, keeping the
 /// tail (most recent) content.
-fn truncate_buffer(buffer: &VecDeque<String>, max_chars: usize) -> String {
+fn truncate_buffer(buffer: &VecDeque<(u64, String)>, max_chars: usize) -> String {
     if buffer.is_empty() {
         return String::new();
     }
@@ -247,7 +348,7 @@ fn truncate_buffer(buffer: &VecDeque<String>, max_chars: usize) -> String {
     let joined = buffer
         .iter()
         .enumerate()
-        .map(|(i, entry)| {
+        .map(|(i, (_, entry))| {
             if i == 0 {
                 entry.clone()
             } else {
@@ -416,6 +517,7 @@ mod tests {
                 .recent_buffer
                 .front()
                 .unwrap()
+                .1
                 .starts_with("entry 5")
         );
         assert!(
@@ -423,7 +525,67 @@ mod tests {
                 .recent_buffer
                 .back()
                 .unwrap()
+                .1
                 .starts_with("entry 24")
         );
+    }
+
+    #[test]
+    fn snapshot_all_returns_sorted_summaries() {
+        let store = ProgressStore::new();
+        store.register_job("zeta", "claude");
+        store.register_job("alpha", "codex");
+        store.set_running("alpha");
+        store.push_progress("alpha", "step one");
+        store.set_session_id("alpha", "sess-1");
+
+        let summaries = store.snapshot_all();
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].slug, "alpha");
+        assert_eq!(summaries[0].session_id.as_deref(), Some("sess-1"));
+        assert_eq!(summaries[0].status, JobStatus::Running);
+        assert_eq!(summaries[1].slug, "zeta");
+        assert_eq!(summaries[1].session_id, None);
+    }
+
+    #[test]
+    fn entries_after_streams_only_new_lines() {
+        let store = ProgressStore::new();
+        store.register_job("tailme", "claude");
+        store.set_running("tailme");
+        store.push_progress("tailme", "alpha");
+        store.push_progress("tailme", "bravo");
+
+        let first = store.entries_after("tailme", None).unwrap();
+        assert_eq!(first.entries, vec!["alpha", "bravo"]);
+        let cursor = first.next_cursor;
+        assert!(cursor.is_some());
+
+        // No new entries — empty batch, cursor unchanged.
+        let stale = store.entries_after("tailme", cursor).unwrap();
+        assert!(stale.entries.is_empty());
+        assert_eq!(stale.next_cursor, cursor);
+
+        store.push_progress("tailme", "charlie");
+        let next = store.entries_after("tailme", cursor).unwrap();
+        assert_eq!(next.entries, vec!["charlie"]);
+        assert!(next.next_cursor > cursor);
+    }
+
+    #[test]
+    fn entries_after_unknown_slug_is_none() {
+        let store = ProgressStore::new();
+        assert!(store.entries_after("nope", None).is_none());
+    }
+
+    #[test]
+    fn entries_after_flags_done_on_terminal_status() {
+        let store = ProgressStore::new();
+        store.register_job("finis", "claude");
+        store.set_running("finis");
+        store.set_completed("finis", "all done");
+        let batch = store.entries_after("finis", None).unwrap();
+        assert!(batch.done);
+        assert_eq!(batch.status, JobStatus::Completed);
     }
 }

@@ -29,10 +29,12 @@ pub(crate) struct OrchestratorJobManager {
     job_tx: mpsc::UnboundedSender<OrchestratorJob>,
     event_rx: mpsc::UnboundedReceiver<OrchestratorJobEvent>,
     progress: Arc<ProgressStore>,
+    provider_name: &'static str,
 }
 
 impl OrchestratorJobManager {
     pub(crate) fn spawn(provider: OrchestratorProvider) -> Self {
+        let provider_name = provider.name();
         let (job_tx, job_rx) = mpsc::unbounded_channel();
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let progress = Arc::new(ProgressStore::new());
@@ -42,12 +44,17 @@ impl OrchestratorJobManager {
             event_tx,
             Arc::clone(&progress),
         ));
-        eprintln!("orchestrator job manager started");
+        eprintln!("orchestrator job manager started provider={provider_name}");
         Self {
             job_tx,
             event_rx,
             progress,
+            provider_name,
         }
+    }
+
+    pub(crate) fn progress_store(&self) -> Arc<ProgressStore> {
+        Arc::clone(&self.progress)
     }
 
     pub(crate) fn enqueue(&self, job: OrchestratorJob) -> Result<(), String> {
@@ -58,7 +65,7 @@ impl OrchestratorJobManager {
             job.args.urgency,
             preview(&job.args.user_intent)
         );
-        self.progress.register_job(&job.slug, "orchestrator");
+        self.progress.register_job(&job.slug, self.provider_name);
         self.progress
             .push_progress(&job.slug, &format!("Queued background job {}.", job.id));
         self.job_tx
