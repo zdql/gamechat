@@ -67,7 +67,7 @@ pub(crate) fn session_update_json_for(
                 {
                     "type": "function",
                     "name": "sub_agent_progress",
-                    "description": "Check the latest progress for a background orchestrator sub-agent by slug. Returns status, last_activity, recent_snippet (capped to ~1000 chars), elapsed_seconds, and a rate_limited flag. Call sparingly: at most once every few seconds for the same slug, and only when the user asks how the work is going or you need material for a spoken update.",
+                    "description": "Check the latest progress for a background orchestrator sub-agent by slug. Returns a one- or two-sentence natural-language `summary` of what the sub-agent is doing right now, plus status, elapsed_seconds, and a rate_limited flag. The summary is produced by a small model from the raw log buffer, so reading it aloud is safe. Call sparingly: at most once every few seconds for the same slug.",
                     "parameters": {
                         "type": "object",
                         "additionalProperties": false,
@@ -76,9 +76,13 @@ pub(crate) fn session_update_json_for(
                                 "type": "string",
                                 "description": "Stable snake_case slug originally passed to delegate_to_orchestrator."
                             },
+                            "question": {
+                                "type": "string",
+                                "description": "Optional natural-language question the summary should bias toward answering (e.g. \"is it done?\", \"did it find the bug?\"). Pass through whatever the user just asked."
+                            },
                             "window_size": {
                                 "type": "integer",
-                                "description": "Optional character budget for recent_snippet. Defaults to 1000 and is clamped between 200 and 1000."
+                                "description": "Optional character budget for the log buffer the summarizer sees. Defaults to 1000 and is clamped between 200 and 1000."
                             }
                         },
                         "required": ["slug"]

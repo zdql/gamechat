@@ -1,5 +1,7 @@
 # gamechat
 
+![gamechat](assets/banner-schematic.png)
+
 Voice-driven supervisor for [Claude Code] and [Codex]. You talk to a low-latency Realtime model in your terminal; whenever you ask for real work, it dispatches a job to a background coding agent and narrates the result when it lands.
 
 ```
@@ -140,7 +142,6 @@ gamechat --realtime --preset jarvis --voice ash    # keep persona, swap voice
 ```
 
 Mix and match — `--preset jarvis --voice ash` keeps the butler dialogue on a gravelly voice.
-
 
 Built-in presets — one zany persona per Realtime voice, plus a bare default and a useful `concise`:
 

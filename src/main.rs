@@ -402,7 +402,7 @@ fn apply_env_file(path: &std::path::Path) {
         }
         if let Some((key, val)) = line.split_once('=') {
             let key = key.trim();
-            let val = val.trim().trim_matches('"').trim_matches('\'');
+            let val = unquote_env_value(val.trim());
             if std::env::var(key).is_err() {
                 // SAFETY: called once at startup before any worker tasks.
                 unsafe {
@@ -410,5 +410,58 @@ fn apply_env_file(path: &std::path::Path) {
                 }
             }
         }
+    }
+}
+
+// Strip exactly one matching outer pair of single or double quotes.
+// For single-quoted values, decode the POSIX `'\''` literal-quote escape
+// produced by the installer's shell-safe quoting.
+fn unquote_env_value(val: &str) -> String {
+    let bytes = val.as_bytes();
+    if bytes.len() >= 2 {
+        let (first, last) = (bytes[0], bytes[bytes.len() - 1]);
+        if first == b'"' && last == b'"' {
+            return val[1..val.len() - 1].to_string();
+        }
+        if first == b'\'' && last == b'\'' {
+            return val[1..val.len() - 1].replace("'\\''", "'");
+        }
+    }
+    val.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unquote_env_value;
+
+    #[test]
+    fn unquote_plain_value_passthrough() {
+        assert_eq!(unquote_env_value("sk-abc_DEF-123"), "sk-abc_DEF-123");
+    }
+
+    #[test]
+    fn unquote_strips_outer_double_quotes() {
+        assert_eq!(unquote_env_value("\"sk-abc\""), "sk-abc");
+    }
+
+    #[test]
+    fn unquote_strips_outer_single_quotes() {
+        assert_eq!(unquote_env_value("'sk-abc'"), "sk-abc");
+    }
+
+    #[test]
+    fn unquote_decodes_posix_apostrophe_escape() {
+        // What the installer writes for a key containing a literal `'`.
+        assert_eq!(unquote_env_value("'sk-with'\\''apos'"), "sk-with'apos");
+    }
+
+    #[test]
+    fn unquote_preserves_inner_whitespace() {
+        assert_eq!(unquote_env_value("'sk weird value'"), "sk weird value");
+    }
+
+    #[test]
+    fn unquote_leaves_unbalanced_quotes_alone() {
+        assert_eq!(unquote_env_value("'no-trailing"), "'no-trailing");
     }
 }

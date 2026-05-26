@@ -1,6 +1,7 @@
 use crate::orchestrator::jobs::{OrchestratorJob, OrchestratorJobEvent, OrchestratorJobManager};
 use crate::orchestrator::progress::DEFAULT_WINDOW_SIZE;
 use crate::orchestrator::shared::preview;
+use crate::orchestrator::summarizer::{SharedSummarizer, SummarizeRequest};
 use crate::types::{CheckSubagentProgressArgs, DelegateToOrchestratorArgs, VoiceUpdate};
 use serde_json::json;
 use std::collections::HashSet;
@@ -11,29 +12,31 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // Realtime conversation items.
 pub(crate) struct OrchestratorBridge {
     handled_function_calls: HashSet<String>,
+    summarizer: SharedSummarizer,
 }
 
 impl OrchestratorBridge {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(summarizer: SharedSummarizer) -> Self {
         Self {
             handled_function_calls: HashSet::new(),
+            summarizer,
         }
     }
 
-    pub(crate) fn handle_realtime_event(
+    pub(crate) async fn handle_realtime_event(
         &mut self,
         value: &serde_json::Value,
         jobs: &OrchestratorJobManager,
     ) -> Result<Vec<serde_json::Value>, String> {
         match value.get("type").and_then(|v| v.as_str()) {
             Some("response.function_call_arguments.done") => {
-                self.handle_function_call_done(value, jobs)
+                self.handle_function_call_done(value, jobs).await
             }
             Some("response.output_item.done") => {
                 let Some(call) = function_call_from_output_item(value) else {
                     return Ok(Vec::new());
                 };
-                self.handle_function_call_done(&call, jobs)
+                self.handle_function_call_done(&call, jobs).await
             }
             _ => Ok(Vec::new()),
         }
@@ -56,7 +59,7 @@ impl OrchestratorBridge {
         }
     }
 
-    fn handle_function_call_done(
+    async fn handle_function_call_done(
         &mut self,
         value: &serde_json::Value,
         jobs: &OrchestratorJobManager,
@@ -76,7 +79,7 @@ impl OrchestratorBridge {
 
         match name {
             "delegate_to_orchestrator" => self.handle_delegate_call(call_id, value, jobs),
-            "sub_agent_progress" => self.handle_progress_call(call_id, value, jobs),
+            "sub_agent_progress" => self.handle_progress_call(call_id, value, jobs).await,
             _ => Ok(Vec::new()),
         }
     }
@@ -160,7 +163,7 @@ impl OrchestratorBridge {
         ])
     }
 
-    fn handle_progress_call(
+    async fn handle_progress_call(
         &mut self,
         call_id: &str,
         value: &serde_json::Value,
@@ -222,6 +225,53 @@ impl OrchestratorBridge {
             );
         };
 
+        if snapshot.rate_limited {
+            return progress_tool_events(
+                call_id,
+                json!({
+                    "ok": true,
+                    "slug": slug,
+                    "status": snapshot.status,
+                    "provider": snapshot.provider,
+                    "elapsed_seconds": snapshot.elapsed_seconds,
+                    "rate_limited": true,
+                    "retry_after_seconds": snapshot.retry_after_seconds,
+                    "guidance": "Rate limited. Wait retry_after_seconds before calling again; reuse the prior summary verbatim or stall briefly."
+                }),
+            );
+        }
+
+        let question = args.question.as_deref().map(str::trim).filter(|q| !q.is_empty());
+        let summary = match self
+            .summarizer
+            .summarize(SummarizeRequest {
+                slug: &slug,
+                provider: &snapshot.provider,
+                status: snapshot.status,
+                elapsed_seconds: snapshot.elapsed_seconds,
+                recent_logs: &snapshot.recent_snippet,
+                question,
+            })
+            .await
+        {
+            Ok(summary) => summary,
+            Err(err) => {
+                eprintln!(
+                    "sub_agent_progress summarizer failed slug={} error={}",
+                    slug, err
+                );
+                return progress_tool_events(
+                    call_id,
+                    json!({
+                        "ok": false,
+                        "status": "summarizer_error",
+                        "slug": slug,
+                        "error": format!("summarizer unavailable: {err}")
+                    }),
+                );
+            }
+        };
+
         progress_tool_events(
             call_id,
             json!({
@@ -229,12 +279,11 @@ impl OrchestratorBridge {
                 "slug": slug,
                 "status": snapshot.status,
                 "provider": snapshot.provider,
-                "last_activity": snapshot.last_message,
-                "recent_snippet": snapshot.recent_snippet,
+                "summary": summary,
                 "elapsed_seconds": snapshot.elapsed_seconds,
-                "rate_limited": snapshot.rate_limited,
-                "retry_after_seconds": snapshot.retry_after_seconds,
-                "guidance": "Use this to give a concise spoken update. Do not claim the work is complete unless status is completed. If rate_limited is true, do not call this tool again until retry_after_seconds has elapsed."
+                "rate_limited": false,
+                "retry_after_seconds": 0,
+                "guidance": "Speak the summary as-is or paraphrase lightly. Do not claim the work is complete unless status is completed."
             }),
         )
     }
@@ -397,10 +446,18 @@ fn sanitize_slug(value: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::orchestrator::OrchestratorProvider;
+    use crate::orchestrator::summarizer::test_support::{ErroringSummarizer, FakeSummarizer};
+    use std::sync::Arc;
+
+    fn bridge_with_fake_summary(reply: &str) -> (OrchestratorBridge, Arc<FakeSummarizer>) {
+        let fake = Arc::new(FakeSummarizer::new(reply));
+        let bridge = OrchestratorBridge::new(fake.clone());
+        (bridge, fake)
+    }
 
     #[tokio::test]
     async fn sub_agent_progress_unknown_slug_returns_error_payload() {
-        let mut bridge = OrchestratorBridge::new();
+        let (mut bridge, _) = bridge_with_fake_summary("unused");
         let jobs = OrchestratorJobManager::spawn(OrchestratorProvider::claude(None, None));
         let call = json!({
             "type": "response.function_call_arguments.done",
@@ -411,6 +468,7 @@ mod tests {
 
         let events = bridge
             .handle_realtime_event(&call, &jobs)
+            .await
             .expect("progress call should produce a tool result");
         let output = events[0]["item"]["output"]
             .as_str()
@@ -425,8 +483,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sub_agent_progress_known_slug_includes_elapsed_and_rate_limited() {
-        let mut bridge = OrchestratorBridge::new();
+    async fn sub_agent_progress_returns_summary_then_rate_limits() {
+        let (mut bridge, fake) =
+            bridge_with_fake_summary("Reading files and drafting changes.");
         let jobs = OrchestratorJobManager::spawn(OrchestratorProvider::claude(None, None));
         // Register a slug directly via enqueue so we don't depend on the
         // provider binary actually being available — enqueue calls into
@@ -444,15 +503,22 @@ mod tests {
         })
         .expect("enqueue should succeed");
 
-        let mk_call = |call_id: &str| json!({
+        let mk_call = |call_id: &str, args: &str| json!({
             "type": "response.function_call_arguments.done",
             "name": "sub_agent_progress",
             "call_id": call_id,
-            "arguments": "{\"slug\":\"refactor_docs\"}"
+            "arguments": args,
         });
 
         let first = bridge
-            .handle_realtime_event(&mk_call("call_progress_first"), &jobs)
+            .handle_realtime_event(
+                &mk_call(
+                    "call_progress_first",
+                    "{\"slug\":\"refactor_docs\",\"question\":\"is it done?\"}",
+                ),
+                &jobs,
+            )
+            .await
             .expect("first progress call should succeed");
         let first_payload: serde_json::Value =
             serde_json::from_str(first[0]["item"]["output"].as_str().unwrap()).unwrap();
@@ -460,16 +526,77 @@ mod tests {
         assert_eq!(first_payload["slug"], "refactor_docs");
         assert!(first_payload.get("elapsed_seconds").is_some());
         assert_eq!(first_payload["rate_limited"], false);
+        assert_eq!(
+            first_payload["summary"].as_str(),
+            Some("Reading files and drafting changes.")
+        );
+        assert!(first_payload.get("last_activity").is_none());
 
-        // Immediate second call should be flagged rate_limited but still
-        // ok=true and carry the cached last_activity.
+        let recorded = fake
+            .last_request
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("summarizer should have been called");
+        assert_eq!(recorded.slug, "refactor_docs");
+        assert_eq!(recorded.question.as_deref(), Some("is it done?"));
+
+        // Immediate second call should be flagged rate_limited and skip the
+        // summarizer entirely.
         let second = bridge
-            .handle_realtime_event(&mk_call("call_progress_second"), &jobs)
+            .handle_realtime_event(
+                &mk_call("call_progress_second", "{\"slug\":\"refactor_docs\"}"),
+                &jobs,
+            )
+            .await
             .expect("second progress call should succeed");
         let second_payload: serde_json::Value =
             serde_json::from_str(second[0]["item"]["output"].as_str().unwrap()).unwrap();
         assert_eq!(second_payload["ok"], true);
         assert_eq!(second_payload["rate_limited"], true);
         assert!(second_payload["retry_after_seconds"].as_u64().unwrap_or(0) > 0);
+        assert!(second_payload.get("summary").is_none());
+    }
+
+    #[tokio::test]
+    async fn sub_agent_progress_summarizer_error_returns_error_payload() {
+        let summarizer = Arc::new(ErroringSummarizer {
+            error: "boom".to_string(),
+        });
+        let mut bridge = OrchestratorBridge::new(summarizer);
+        let jobs = OrchestratorJobManager::spawn(OrchestratorProvider::claude(None, None));
+        jobs.enqueue(crate::orchestrator::jobs::OrchestratorJob {
+            id: "job-err".to_string(),
+            slug: "failing_slug".to_string(),
+            args: crate::types::DelegateToOrchestratorArgs {
+                slug: "failing_slug".to_string(),
+                user_intent: "noop".to_string(),
+                recent_context: String::new(),
+                urgency: "background".to_string(),
+                suggested_user_update: None,
+            },
+        })
+        .expect("enqueue should succeed");
+
+        let call = json!({
+            "type": "response.function_call_arguments.done",
+            "name": "sub_agent_progress",
+            "call_id": "call_progress_err",
+            "arguments": "{\"slug\":\"failing_slug\"}"
+        });
+        let events = bridge
+            .handle_realtime_event(&call, &jobs)
+            .await
+            .expect("progress call should still emit tool events");
+        let payload: serde_json::Value =
+            serde_json::from_str(events[0]["item"]["output"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["ok"], false);
+        assert_eq!(payload["status"], "summarizer_error");
+        assert!(
+            payload["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("boom")
+        );
     }
 }

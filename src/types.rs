@@ -58,6 +58,11 @@ pub(crate) struct CheckSubagentProgressArgs {
     pub slug: String,
     #[serde(default)]
     pub window_size: Option<usize>,
+    /// Optional natural-language question that the summarizer should bias
+    /// the summary toward answering (e.g. "is it done yet?", "did it find
+    /// the bug?"). When absent the summarizer produces a generic update.
+    #[serde(default)]
+    pub question: Option<String>,
 }
 
 fn default_urgency() -> String {

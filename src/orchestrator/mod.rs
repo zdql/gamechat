@@ -19,6 +19,7 @@ pub(crate) mod bridge;
 pub(crate) mod interface;
 pub(crate) mod jobs;
 pub(crate) mod progress;
+pub(crate) mod summarizer;
 
 mod claude;
 mod openai;
@@ -27,3 +28,4 @@ mod shared;
 pub(crate) use bridge::OrchestratorBridge;
 pub(crate) use interface::OrchestratorProvider;
 pub(crate) use jobs::OrchestratorJobManager;
+pub(crate) use summarizer::OpenAiSummarizer;
