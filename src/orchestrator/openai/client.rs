@@ -1,6 +1,6 @@
 //! Wrapper around the OpenAI Codex CLI (`codex exec`).
 
-use crate::orchestrator::interface::SendResult;
+use crate::orchestrator::interface::{CleanLogLine, SendResult};
 use crate::orchestrator::progress::ProgressReporter;
 use crate::orchestrator::shared::{format_job, preview, read_logged_stream};
 use std::path::PathBuf;
@@ -19,6 +19,7 @@ pub(crate) struct CodexClient {
     path: PathBuf,
     model: Option<String>,
     conversation_id: String,
+    clean_log_line: CleanLogLine,
 }
 
 impl CodexClient {
@@ -26,6 +27,7 @@ impl CodexClient {
         codex_bin: Option<String>,
         model: Option<String>,
         conversation_id: String,
+        clean_log_line: CleanLogLine,
     ) -> Result<Self, String> {
         let path = resolve_codex_bin(codex_bin)?;
 
@@ -57,6 +59,7 @@ impl CodexClient {
             path,
             model,
             conversation_id,
+            clean_log_line,
         })
     }
 
@@ -115,6 +118,7 @@ impl CodexClient {
             job_id.to_string(),
             stdout,
             progress.clone(),
+            self.clean_log_line,
         ));
         let stderr_task = tokio::spawn(read_logged_stream(
             "codex",
@@ -122,6 +126,7 @@ impl CodexClient {
             job_id.to_string(),
             stderr,
             progress.clone(),
+            self.clean_log_line,
         ));
 
         let status = child

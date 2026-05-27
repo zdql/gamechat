@@ -6,9 +6,10 @@
 //!
 //! Public surface (for `interface.rs`): [`OpenAiProvider`].
 
+mod cleaner;
 mod client;
 
-use crate::orchestrator::interface::{Provider, Session, SendResult};
+use crate::orchestrator::interface::{CleanLogLine, Provider, SendResult, Session};
 use crate::orchestrator::progress::ProgressReporter;
 use async_trait::async_trait;
 use client::CodexClient;
@@ -30,10 +31,19 @@ impl Provider for OpenAiProvider {
         "codex"
     }
 
+    fn clean_log_line(&self) -> CleanLogLine {
+        cleaner::clean_log_line
+    }
+
     async fn open_session(&self, slug: &str) -> Result<Box<dyn Session>, String> {
         let conversation_id = format!("codex-{slug}");
-        let client =
-            CodexClient::spawn(self.codex_bin.clone(), self.model.clone(), conversation_id).await?;
+        let client = CodexClient::spawn(
+            self.codex_bin.clone(),
+            self.model.clone(),
+            conversation_id,
+            self.clean_log_line(),
+        )
+        .await?;
         Ok(Box::new(OpenAiSession { client }))
     }
 }

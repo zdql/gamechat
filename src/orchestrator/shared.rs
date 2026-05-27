@@ -3,6 +3,7 @@
 //! Everything in this module is provider-agnostic: log line formatting,
 //! string trimming, and a generic "drain a child process stream" helper.
 
+use crate::orchestrator::interface::CleanLogLine;
 use crate::orchestrator::progress::ProgressReporter;
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 
@@ -23,12 +24,17 @@ pub(crate) fn preview(value: &str) -> String {
 
 /// Drain a child process stream line-by-line, mirroring each line to stderr
 /// and to the optional progress reporter, and returning the collected bytes.
+///
+/// Each line is passed through the provider's `clean_log_line` cleaner before
+/// being pushed to the reporter; the cleaner decides whether the line is
+/// signal worth keeping (and in what form) or wire noise to drop.
 pub(crate) async fn read_logged_stream<R>(
     provider: &'static str,
     stream_name: &'static str,
     job_id: String,
     reader: R,
     progress: Option<ProgressReporter>,
+    clean_log_line: CleanLogLine,
 ) -> Result<Vec<u8>, String>
 where
     R: AsyncRead + Unpin,
@@ -55,7 +61,9 @@ where
             preview(&text)
         );
         if let Some(reporter) = progress.as_ref() {
-            reporter.push(&format!("{provider} {stream_name}: {}", text.trim()));
+            if let Some(cleaned) = clean_log_line(&text, stream_name) {
+                reporter.push(&cleaned);
+            }
         }
     }
 

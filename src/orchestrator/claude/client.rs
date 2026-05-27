@@ -1,6 +1,6 @@
 //! Wrapper around the `claude` CLI in print mode.
 
-use crate::orchestrator::interface::SendResult;
+use crate::orchestrator::interface::{CleanLogLine, SendResult};
 use crate::orchestrator::progress::ProgressReporter;
 use crate::orchestrator::shared::{format_job, preview, read_logged_stream};
 use serde_json::Value;
@@ -19,6 +19,7 @@ pub(crate) struct ClaudeClient {
     model: Option<String>,
     conversation_id: String,
     session_id: Option<String>,
+    clean_log_line: CleanLogLine,
 }
 
 impl ClaudeClient {
@@ -26,6 +27,7 @@ impl ClaudeClient {
         claude_bin: Option<String>,
         model: Option<String>,
         conversation_id: String,
+        clean_log_line: CleanLogLine,
     ) -> Result<Self, String> {
         let path = resolve_claude_bin(claude_bin)?;
 
@@ -57,6 +59,7 @@ impl ClaudeClient {
             model,
             conversation_id,
             session_id: None,
+            clean_log_line,
         })
     }
 
@@ -126,6 +129,7 @@ impl ClaudeClient {
             job_id.to_string(),
             stdout,
             progress.clone(),
+            self.clean_log_line,
         ));
         let stderr_task = tokio::spawn(read_logged_stream(
             "claude",
@@ -133,6 +137,7 @@ impl ClaudeClient {
             job_id.to_string(),
             stderr,
             progress.clone(),
+            self.clean_log_line,
         ));
 
         let status = child
