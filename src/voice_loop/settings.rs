@@ -5,6 +5,12 @@ use std::path::{Path, PathBuf};
 // Default voice if neither the chosen preset nor the user's settings override it.
 pub(crate) const DEFAULT_VOICE: &str = "marin";
 
+// Default mic gain while the assistant is speaking. Conservative: low enough
+// that ambient speaker leakage stays below the server VAD threshold on a
+// typical built-in laptop mic+speaker, high enough that intentional user
+// speech rises above it to trigger barge-in.
+pub(crate) const DEFAULT_MIC_DUCKING_GAIN: f32 = 0.25;
+
 // The orchestrator-aware base prompt. Personas are appended to this so every
 // preset still knows how to delegate work and check progress.
 pub(super) const BASE_INSTRUCTIONS: &str = "You are a realtime voice frontend. Keep the spoken conversation moving. When the user asks for work that benefits from deeper reasoning, tools, files, research, or multi-step execution, call delegate_to_orchestrator. Always include a stable snake_case slug that names what the background agent will do, such as refactor_docs. Reuse the same slug to continue that background conversation; use a new slug for unrelated work. If the user asks how background work is going, call sub_agent_progress with that slug and read the returned summary aloud. When the user asks something specific (\"is it done?\", \"did it find the bug?\"), pass it through as the question argument so the summary answers it. Call sub_agent_progress sparingly: only when the user asks or when you need material to fill a silence, and never twice in a row within a few seconds. If the response has rate_limited=true, wait retry_after_seconds before calling again. Do not pretend the background work is done until the orchestrator returns an update or sub_agent_progress reports status=completed.";
@@ -23,6 +29,12 @@ pub(crate) struct Settings {
     /// User-defined presets. Override built-ins of the same name.
     #[serde(default)]
     pub presets: HashMap<String, Preset>,
+    /// Mic gain (0.0..=1.0) applied while the assistant is speaking. Lower
+    /// values give better echo rejection but make barge-in less sensitive.
+    /// Set to 0.0 to fully gate the mic during assistant speech (legacy
+    /// behavior — disables barge-in entirely).
+    #[serde(default)]
+    pub mic_ducking_gain: Option<f32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -37,6 +49,7 @@ pub(crate) struct Preset {
 pub(crate) struct ResolvedVoiceSettings {
     pub voice: String,
     pub instructions: String,
+    pub mic_ducking_gain: f32,
 }
 
 pub(crate) fn builtin_presets() -> HashMap<String, Preset> {
@@ -173,9 +186,15 @@ impl Settings {
             format!("{BASE_INSTRUCTIONS}\n\n{}", persona.trim())
         };
 
+        let mic_ducking_gain = self
+            .mic_ducking_gain
+            .unwrap_or(DEFAULT_MIC_DUCKING_GAIN)
+            .clamp(0.0, 1.0);
+
         Ok(ResolvedVoiceSettings {
             voice,
             instructions,
+            mic_ducking_gain,
         })
     }
 }
@@ -225,6 +244,7 @@ mod tests {
             preset: Some("jarvis".to_string()),
             persona: None,
             presets: HashMap::new(),
+            mic_ducking_gain: None,
         };
         let resolved = settings.resolve(None, None).unwrap();
         assert_eq!(resolved.voice, "echo");
@@ -245,6 +265,7 @@ mod tests {
             preset: Some("jarvis".to_string()),
             persona: None,
             presets,
+            mic_ducking_gain: None,
         };
         let resolved = settings.resolve(None, None).unwrap();
         assert_eq!(resolved.voice, "alloy");
@@ -258,6 +279,7 @@ mod tests {
             preset: Some("jarvis".to_string()),
             persona: Some("Just be a robot.".to_string()),
             presets: HashMap::new(),
+            mic_ducking_gain: None,
         };
         let resolved = settings.resolve(None, None).unwrap();
         assert_eq!(resolved.voice, "cedar");
@@ -279,6 +301,39 @@ mod tests {
         let json = r#"{"preset": "jarvis"}"#;
         let settings: Settings = serde_json::from_str(json).unwrap();
         assert_eq!(settings.preset.as_deref(), Some("jarvis"));
+    }
+
+    #[test]
+    fn default_mic_ducking_gain_is_conservative() {
+        let resolved = Settings::default().resolve(None, None).unwrap();
+        assert!((resolved.mic_ducking_gain - DEFAULT_MIC_DUCKING_GAIN).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn mic_ducking_gain_clamps_into_range() {
+        let too_high = Settings {
+            mic_ducking_gain: Some(7.0),
+            ..Settings::default()
+        }
+        .resolve(None, None)
+        .unwrap();
+        assert!((too_high.mic_ducking_gain - 1.0).abs() < f32::EPSILON);
+
+        let too_low = Settings {
+            mic_ducking_gain: Some(-1.0),
+            ..Settings::default()
+        }
+        .resolve(None, None)
+        .unwrap();
+        assert!(too_low.mic_ducking_gain.abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn mic_ducking_gain_parses_from_json() {
+        let json = r#"{"mic_ducking_gain": 0.4}"#;
+        let settings: Settings = serde_json::from_str(json).unwrap();
+        let resolved = settings.resolve(None, None).unwrap();
+        assert!((resolved.mic_ducking_gain - 0.4).abs() < 1e-6);
     }
 
     #[test]

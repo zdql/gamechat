@@ -130,11 +130,14 @@ pub(super) fn start_output_stream(
     Ok((stream, sample_rate))
 }
 
+// Returns the number of source (24 kHz) PCM samples decoded from `delta`, so
+// the caller can track how much assistant audio has been enqueued for
+// conversation.item.truncate accounting on barge-in.
 pub(super) fn enqueue_audio_delta(
     delta: &str,
     queue: Arc<Mutex<PlaybackBuffer>>,
     output_rate: u32,
-) -> Result<(), String> {
+) -> Result<usize, String> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(delta)
         .map_err(|e| format!("invalid audio delta base64: {e}"))?;
@@ -142,12 +145,13 @@ pub(super) fn enqueue_audio_delta(
     for chunk in bytes.chunks_exact(2) {
         pcm.push(i16::from_le_bytes([chunk[0], chunk[1]]));
     }
+    let source_samples = pcm.len();
     let resampled = resample_i16(&pcm, 24_000, output_rate);
     let mut guard = queue.lock().map_err(|_| "playback queue poisoned")?;
     guard
         .samples
         .extend(resampled.into_iter().map(|s| s as f32 / i16::MAX as f32));
-    Ok(())
+    Ok(source_samples)
 }
 
 pub(super) fn playback_depth_ms(
@@ -159,6 +163,26 @@ pub(super) fn playback_depth_ms(
     }
     let guard = queue.lock().ok()?;
     Some(guard.samples.len() * 1_000 / output_rate as usize)
+}
+
+// Drop any queued playback audio. Used on barge-in so we stop voicing the
+// (now-cancelled) assistant turn the moment the user starts speaking.
+pub(super) fn clear_playback(queue: &Arc<Mutex<PlaybackBuffer>>) {
+    if let Ok(mut guard) = queue.lock() {
+        guard.samples.clear();
+        guard.started = false;
+    }
+}
+
+// Attenuate mic samples by `gain` (0.0..=1.0). Used to duck the mic while the
+// assistant is speaking so speaker leakage doesn't trip the server-side VAD,
+// while leaving real user speech loud enough to barge in.
+pub(super) fn duck_samples(samples: &[i16], gain: f32) -> Vec<i16> {
+    let gain = gain.clamp(0.0, 1.0);
+    samples
+        .iter()
+        .map(|s| (*s as f32 * gain).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16)
+        .collect()
 }
 
 pub(super) fn i16_to_le_bytes(samples: &[i16]) -> Vec<u8> {
@@ -280,5 +304,57 @@ impl FromF32 for i16 {
 impl FromF32 for u16 {
     fn from_f32(value: f32) -> Self {
         ((value.clamp(-1.0, 1.0) * 0.5 + 0.5) * u16::MAX as f32) as u16
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duck_samples_zero_gain_silences() {
+        let input = vec![1000_i16, -2000, 3000, -4000];
+        let out = duck_samples(&input, 0.0);
+        assert!(out.iter().all(|s| *s == 0));
+    }
+
+    #[test]
+    fn duck_samples_unity_gain_passthrough() {
+        let input = vec![1000_i16, -2000, 3000, -4000];
+        let out = duck_samples(&input, 1.0);
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn duck_samples_half_gain_attenuates() {
+        let input = vec![10_000_i16, -10_000];
+        let out = duck_samples(&input, 0.5);
+        // Allow ±1 for f32 rounding.
+        assert!((out[0] - 5000).abs() <= 1, "got {}", out[0]);
+        assert!((out[1] + 5000).abs() <= 1, "got {}", out[1]);
+    }
+
+    #[test]
+    fn duck_samples_clamps_gain_above_one() {
+        // Negative gain or gain >1.0 must not panic or saturate weirdly.
+        let input = vec![10_000_i16];
+        let out_high = duck_samples(&input, 5.0);
+        assert_eq!(out_high, input, "gain >1.0 should clamp to 1.0");
+        let out_neg = duck_samples(&input, -1.0);
+        assert_eq!(out_neg, vec![0], "negative gain should clamp to 0.0");
+    }
+
+    #[test]
+    fn clear_playback_resets_buffer_and_start_flag() {
+        let buf = Arc::new(Mutex::new(PlaybackBuffer::new()));
+        {
+            let mut guard = buf.lock().unwrap();
+            guard.samples.extend([0.1_f32, 0.2, 0.3]);
+            guard.started = true;
+        }
+        clear_playback(&buf);
+        let guard = buf.lock().unwrap();
+        assert!(guard.samples.is_empty());
+        assert!(!guard.started);
     }
 }
