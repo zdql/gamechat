@@ -18,13 +18,15 @@
 //!   resume command for the underlying agent UI.
 
 mod client;
+mod discovery;
 mod protocol;
 mod runtime_dir;
 mod server;
 
 use std::path::PathBuf;
 
-pub(crate) use server::spawn_server;
+pub(crate) use discovery::{discover_existing_subagents, seed_discovered_subagents};
+pub(crate) use server::{ResetSignal, spawn_server};
 
 /// Subcommand parsed from `gamechat`'s argv.
 #[derive(Debug)]
@@ -32,6 +34,8 @@ pub(crate) enum ControlSubcommand {
     Inspect,
     Tail { slug: String },
     Open { slug: String, launch: bool },
+    Reset { reason: Option<String> },
+    Discover,
 }
 
 /// Optional connection target. `pid` picks a specific running gamechat; if

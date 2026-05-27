@@ -23,6 +23,12 @@ pub(crate) enum Request {
     },
     /// Look up the resume target for a slug — provider + session id.
     Resume { slug: String },
+    /// Trigger a voice-context reset on the running voice loop. Optional
+    /// `reason` is recorded in the server log alongside the trigger source.
+    Reset {
+        #[serde(default)]
+        reason: Option<String>,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -46,6 +52,12 @@ pub(crate) enum Response {
         slug: String,
         provider: String,
         session_id: Option<String>,
+    },
+    /// Acknowledgement that the reset signal was accepted by the server.
+    /// `dispatched` is true when the voice loop is alive and received the
+    /// signal; false when the voice loop is absent (read-only socket).
+    Reset {
+        dispatched: bool,
     },
     Error {
         message: String,

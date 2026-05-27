@@ -217,12 +217,16 @@ fn parse_control_subcommand() -> Result<Option<(ControlSubcommand, ControlTarget
         return Ok(None);
     };
     let subcommand_name = first.as_str();
-    if !matches!(subcommand_name, "inspect" | "tail" | "open") {
+    if !matches!(
+        subcommand_name,
+        "inspect" | "tail" | "open" | "reset" | "discover"
+    ) {
         return Ok(None);
     }
     let mut positional: Vec<String> = Vec::new();
     let mut target = ControlTarget::default();
     let mut launch = false;
+    let mut reset_reason: Option<String> = None;
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--pid" => {
@@ -236,6 +240,7 @@ fn parse_control_subcommand() -> Result<Option<(ControlSubcommand, ControlTarget
                 target.socket = Some(PathBuf::from(next_value(&mut iter, "--socket")?));
             }
             "--launch" => launch = true,
+            "--reason" => reset_reason = Some(next_value(&mut iter, "--reason")?),
             "--help" | "-h" => return Err(control_usage()),
             other if other.starts_with("--") => {
                 return Err(format!("unknown argument for {subcommand_name}: {other}"));
@@ -267,6 +272,29 @@ fn parse_control_subcommand() -> Result<Option<(ControlSubcommand, ControlTarget
                 .ok_or_else(|| "open requires a slug, e.g. `gamechat open refactor_docs`".to_string())?;
             ControlSubcommand::Open { slug, launch }
         }
+        "reset" => {
+            if !positional.is_empty() {
+                return Err(format!(
+                    "reset takes no positional arguments, got: {}. Use --reason <text> if you want to record one.",
+                    positional.join(" ")
+                ));
+            }
+            ControlSubcommand::Reset { reason: reset_reason }
+        }
+        "discover" => {
+            if !positional.is_empty() {
+                return Err(format!(
+                    "discover takes no positional arguments, got: {}",
+                    positional.join(" ")
+                ));
+            }
+            if target.pid.is_some() || target.socket.is_some() {
+                return Err(
+                    "discover surveys every live gamechat in the runtime dir; --pid/--socket do not apply".to_string(),
+                );
+            }
+            ControlSubcommand::Discover
+        }
         _ => unreachable!(),
     };
     Ok(Some((subcommand, target)))
@@ -277,10 +305,16 @@ fn control_usage() -> String {
   gamechat inspect [--pid N | --socket PATH]
   gamechat tail <slug> [--pid N | --socket PATH]
   gamechat open <slug> [--pid N | --socket PATH] [--launch]
+  gamechat reset [--pid N | --socket PATH] [--reason TEXT]
+  gamechat discover
 
 Inspect a running gamechat realtime session from another terminal. With no
 target flag the client connects to the only running gamechat instance and
 errors if more than one is present.
+
+`reset` clears the realtime conversation context on the running voice loop
+without disturbing audio playback. `discover` walks the runtime dir and
+reports the active sub-agent slugs of every other live gamechat instance.
 "
     .to_string()
 }
@@ -310,6 +344,8 @@ fn usage() -> String {
   gamechat inspect                    List active sub-agents in a running session.
   gamechat tail <slug>                Stream a sub-agent's progress buffer.
   gamechat open <slug> [--launch]     Print (or launch on macOS) the resume command.
+  gamechat reset [--reason TEXT]      Reset the realtime voice conversation context.
+  gamechat discover                   List sub-agents in every other live gamechat.
 
 options:
   --realtime                      Start the live voice loop (mic + speakers).

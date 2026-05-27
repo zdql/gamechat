@@ -12,6 +12,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::mpsc;
+
+/// Opaque signal carried from the control server to the voice loop when a
+/// reset is requested. The voice loop maps it onto its own `ResetTrigger`.
+#[derive(Debug, Clone)]
+pub(crate) struct ResetSignal {
+    pub reason: Option<String>,
+}
 
 /// Handle returned to the voice loop; dropping it removes the socket file.
 pub(crate) struct ServerHandle {
@@ -29,6 +37,7 @@ impl Drop for ServerHandle {
 pub(crate) fn spawn_server(
     store: Arc<ProgressStore>,
     provider_name: &'static str,
+    reset_tx: mpsc::UnboundedSender<ResetSignal>,
 ) -> Result<ServerHandle, String> {
     let pid = std::process::id();
     let socket_path = socket_path_for_pid(pid)?;
@@ -46,18 +55,26 @@ pub(crate) fn spawn_server(
     );
     let store_for_task = Arc::clone(&store);
     tokio::spawn(async move {
-        accept_loop(listener, store_for_task, provider_name).await;
+        accept_loop(listener, store_for_task, provider_name, reset_tx).await;
     });
     Ok(ServerHandle { socket_path })
 }
 
-async fn accept_loop(listener: UnixListener, store: Arc<ProgressStore>, provider_name: &'static str) {
+async fn accept_loop(
+    listener: UnixListener,
+    store: Arc<ProgressStore>,
+    provider_name: &'static str,
+    reset_tx: mpsc::UnboundedSender<ResetSignal>,
+) {
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
                 let store = Arc::clone(&store);
+                let reset_tx = reset_tx.clone();
                 tokio::spawn(async move {
-                    if let Err(err) = handle_connection(stream, store, provider_name).await {
+                    if let Err(err) =
+                        handle_connection(stream, store, provider_name, reset_tx).await
+                    {
                         eprintln!("control connection error: {err}");
                     }
                 });
@@ -74,6 +91,7 @@ async fn handle_connection(
     stream: UnixStream,
     store: Arc<ProgressStore>,
     provider_name: &'static str,
+    reset_tx: mpsc::UnboundedSender<ResetSignal>,
 ) -> Result<(), String> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
@@ -86,7 +104,7 @@ async fn handle_connection(
         return Ok(());
     }
     let response = match serde_json::from_str::<Request>(line.trim()) {
-        Ok(request) => handle_request(request, &store, provider_name),
+        Ok(request) => handle_request(request, &store, provider_name, &reset_tx),
         Err(err) => Response::Error {
             message: format!("invalid request: {err}"),
         },
@@ -109,6 +127,7 @@ fn handle_request(
     request: Request,
     store: &ProgressStore,
     provider_name: &'static str,
+    reset_tx: &mpsc::UnboundedSender<ResetSignal>,
 ) -> Response {
     match request {
         Request::Hello => Response::Hello {
@@ -146,6 +165,19 @@ fn handle_request(
                 },
             }
         }
+        Request::Reset { reason } => {
+            let display_reason = reason.clone().unwrap_or_else(|| "unspecified".to_string());
+            eprintln!(
+                "control socket reset requested reason={display_reason}"
+            );
+            let dispatched = reset_tx.send(ResetSignal { reason }).is_ok();
+            if !dispatched {
+                eprintln!(
+                    "control socket reset dropped: voice loop reset channel closed"
+                );
+            }
+            Response::Reset { dispatched }
+        }
     }
 }
 
@@ -160,6 +192,11 @@ mod tests {
     use crate::orchestrator::progress::ProgressStore;
     use std::sync::Arc;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    fn unused_reset_sender() -> mpsc::UnboundedSender<ResetSignal> {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        tx
+    }
 
     #[tokio::test]
     async fn end_to_end_list_and_tail_over_socket() {
@@ -176,7 +213,10 @@ mod tests {
         let listener = UnixListener::bind(&socket_path).unwrap();
 
         let store_for_task = Arc::clone(&store);
-        tokio::spawn(async move { accept_loop(listener, store_for_task, "claude").await });
+        let reset_tx = unused_reset_sender();
+        tokio::spawn(async move {
+            accept_loop(listener, store_for_task, "claude", reset_tx).await
+        });
 
         // List → should see our slug + session_id.
         let resp = roundtrip(&socket_path, Request::List).await;
@@ -278,7 +318,8 @@ mod tests {
         store.push_progress("a", "step");
         store.set_session_id("a", "abc");
 
-        let resp = handle_request(Request::List, &store, "claude");
+        let reset_tx = unused_reset_sender();
+        let resp = handle_request(Request::List, &store, "claude", &reset_tx);
         match resp {
             Response::List { slugs } => {
                 assert_eq!(slugs.len(), 1);
@@ -294,12 +335,14 @@ mod tests {
         let store = Arc::new(ProgressStore::new());
         store.register_job("solo", "claude");
         store.set_session_id("solo", "sess-xyz");
+        let reset_tx = unused_reset_sender();
         let resp = handle_request(
             Request::Resume {
                 slug: "solo".into(),
             },
             &store,
             "claude",
+            &reset_tx,
         );
         match resp {
             Response::Resume {
@@ -322,6 +365,7 @@ mod tests {
         store.push_progress("t", "one");
         store.push_progress("t", "two");
 
+        let reset_tx = unused_reset_sender();
         let resp = handle_request(
             Request::Tail {
                 slug: "t".into(),
@@ -329,6 +373,7 @@ mod tests {
             },
             &store,
             "claude",
+            &reset_tx,
         );
         match resp {
             Response::Tail {
@@ -348,6 +393,7 @@ mod tests {
     #[test]
     fn unknown_slug_in_tail_is_error() {
         let store = Arc::new(ProgressStore::new());
+        let reset_tx = unused_reset_sender();
         let resp = handle_request(
             Request::Tail {
                 slug: "ghost".into(),
@@ -355,10 +401,50 @@ mod tests {
             },
             &store,
             "claude",
+            &reset_tx,
         );
         match resp {
             Response::Error { message } => assert!(message.contains("ghost")),
             other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reset_handler_dispatches_to_voice_loop_channel() {
+        let store = Arc::new(ProgressStore::new());
+        let (reset_tx, mut reset_rx) = mpsc::unbounded_channel::<ResetSignal>();
+        let resp = handle_request(
+            Request::Reset {
+                reason: Some("context_overload".into()),
+            },
+            &store,
+            "claude",
+            &reset_tx,
+        );
+        match resp {
+            Response::Reset { dispatched } => assert!(dispatched),
+            other => panic!("expected Reset, got {other:?}"),
+        }
+        let signal = reset_rx
+            .try_recv()
+            .expect("reset signal should have been forwarded to voice loop");
+        assert_eq!(signal.reason.as_deref(), Some("context_overload"));
+    }
+
+    #[test]
+    fn reset_handler_reports_undispatched_when_channel_closed() {
+        let store = Arc::new(ProgressStore::new());
+        let (reset_tx, reset_rx) = mpsc::unbounded_channel::<ResetSignal>();
+        drop(reset_rx);
+        let resp = handle_request(
+            Request::Reset { reason: None },
+            &store,
+            "claude",
+            &reset_tx,
+        );
+        match resp {
+            Response::Reset { dispatched } => assert!(!dispatched),
+            other => panic!("expected Reset, got {other:?}"),
         }
     }
 }

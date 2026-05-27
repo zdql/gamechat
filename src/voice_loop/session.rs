@@ -87,6 +87,21 @@ pub(crate) fn session_update_json_for(
                         },
                         "required": ["slug"]
                     }
+                },
+                {
+                    "type": "function",
+                    "name": "reset_voice_context",
+                    "description": "Reset the realtime conversation context to a safe baseline. Use when the conversation has grown long enough that context overload is a risk, or when the user explicitly asks for a fresh start. The reset preserves your persona, tools, and any currently-playing audio; it only clears the prior conversation items the server is reasoning over. Do not announce the reset; keep speaking naturally afterward.",
+                    "parameters": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "reason": {
+                                "type": "string",
+                                "description": "Short rationale for the reset, e.g. \"context_overload\" or \"user_requested\". Used only for logging."
+                            }
+                        }
+                    }
                 }
             ]
         }
@@ -97,12 +112,18 @@ pub(crate) fn session_update_json_for(
 mod tests {
     use super::*;
 
+    fn settings_for_test(voice: &str, instructions: &str) -> ResolvedVoiceSettings {
+        ResolvedVoiceSettings {
+            voice: voice.to_string(),
+            instructions: instructions.to_string(),
+            auto_reset_after_items: 0,
+            discover_existing_subagents: true,
+        }
+    }
+
     #[test]
     fn session_exposes_sub_agent_progress_tool() {
-        let settings = ResolvedVoiceSettings {
-            voice: "marin".to_string(),
-            instructions: "base".to_string(),
-        };
+        let settings = settings_for_test("marin", "base");
         let config = session_update_json_for("test-model", &settings);
         let tools = config["session"]["tools"]
             .as_array()
@@ -128,11 +149,33 @@ mod tests {
     }
 
     #[test]
+    fn session_exposes_reset_voice_context_tool() {
+        let settings = settings_for_test("marin", "base");
+        let config = session_update_json_for("test-model", &settings);
+        let tools = config["session"]["tools"]
+            .as_array()
+            .expect("tools should be an array");
+        let reset_tool = tools
+            .iter()
+            .find(|tool| tool["name"].as_str() == Some("reset_voice_context"))
+            .expect("reset_voice_context tool should be present");
+        // Reason is optional; no required fields at all.
+        let required = reset_tool["parameters"]
+            .get("required")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        assert_eq!(required, 0);
+        assert!(
+            reset_tool["parameters"]["properties"]
+                .get("reason")
+                .is_some()
+        );
+    }
+
+    #[test]
     fn session_uses_resolved_voice_and_instructions() {
-        let settings = ResolvedVoiceSettings {
-            voice: "cedar".to_string(),
-            instructions: "custom instructions".to_string(),
-        };
+        let settings = settings_for_test("cedar", "custom instructions");
         let config = session_update_json_for("test-model", &settings);
         assert_eq!(
             config["session"]["audio"]["output"]["voice"].as_str(),
