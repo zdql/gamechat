@@ -102,6 +102,7 @@ mod tests {
         let settings = ResolvedVoiceSettings {
             voice: "marin".to_string(),
             instructions: "base".to_string(),
+            mic_ducking_gain: 0.25,
         };
         let config = session_update_json_for("test-model", &settings);
         let tools = config["session"]["tools"]
@@ -132,6 +133,7 @@ mod tests {
         let settings = ResolvedVoiceSettings {
             voice: "cedar".to_string(),
             instructions: "custom instructions".to_string(),
+            mic_ducking_gain: 0.25,
         };
         let config = session_update_json_for("test-model", &settings);
         assert_eq!(

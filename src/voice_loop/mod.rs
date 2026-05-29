@@ -6,8 +6,8 @@ use crate::orchestrator::{
     OpenAiSummarizer, OrchestratorBridge, OrchestratorJobManager, OrchestratorProvider,
 };
 use audio::{
-    AudioChunk, PlaybackBuffer, enqueue_audio_delta, i16_to_le_bytes, playback_depth_ms,
-    resample_i16, start_input_stream, start_output_stream,
+    AudioChunk, PlaybackBuffer, clear_playback, duck_samples, enqueue_audio_delta, i16_to_le_bytes,
+    playback_depth_ms, resample_i16, start_input_stream, start_output_stream,
 };
 use settings::ResolvedVoiceSettings;
 use base64::Engine;
@@ -96,6 +96,16 @@ struct VoiceLoop<'a> {
 async fn run_voice_loop(mut state: VoiceLoop<'_>) -> Result<(), String> {
     let mut response_active = false;
     let mut deferred_response_creates = VecDeque::<serde_json::Value>::new();
+    // Barge-in bookkeeping. `current_item_id` is the id of the assistant
+    // message item that's currently being voiced; `enqueued_assistant_ms`
+    // is the total assistant audio (in wall-clock ms) we've handed to the
+    // local playback buffer since the response started. Both reset on
+    // response.done. On input_audio_buffer.speech_started while a response
+    // is active we use them to emit conversation.item.truncate with an
+    // accurate audio_end_ms.
+    let mut current_item_id: Option<String> = None;
+    let mut enqueued_assistant_ms: u64 = 0;
+    let mic_ducking_gain = state.voice_settings.mic_ducking_gain;
 
     let url = format!("wss://api.openai.com/v1/realtime?model={}", state.model);
     let mut request = url
@@ -127,14 +137,32 @@ async fn run_voice_loop(mut state: VoiceLoop<'_>) -> Result<(), String> {
     loop {
         tokio::select! {
             Some(chunk) = state.mic_rx.recv() => {
-                if response_active || playback_depth_ms(&state.playback, state.output_rate).unwrap_or(0) > 50 {
-                    continue;
-                }
                 let pcm24 = resample_i16(&chunk.samples, chunk.sample_rate, 24_000);
                 if pcm24.is_empty() {
                     continue;
                 }
-                let bytes = i16_to_le_bytes(&pcm24);
+                // While the assistant is speaking (or its audio is still
+                // draining out of the local playback buffer), duck the mic
+                // so speaker echo stays below the server VAD threshold, but
+                // keep streaming so a deliberate user utterance can still
+                // trigger input_audio_buffer.speech_started for barge-in.
+                let speaking = response_active
+                    || playback_depth_ms(&state.playback, state.output_rate).unwrap_or(0) > 50;
+                let pcm_to_send = if speaking {
+                    if mic_ducking_gain <= 0.0 {
+                        // Legacy behavior: fully gate the mic during
+                        // assistant speech (opt-in, disables barge-in).
+                        continue;
+                    }
+                    if mic_ducking_gain >= 1.0 {
+                        pcm24
+                    } else {
+                        duck_samples(&pcm24, mic_ducking_gain)
+                    }
+                } else {
+                    pcm24
+                };
+                let bytes = i16_to_le_bytes(&pcm_to_send);
                 let audio = base64::engine::general_purpose::STANDARD.encode(bytes);
                 let event = json!({
                     "type": "input_audio_buffer.append",
@@ -170,6 +198,8 @@ async fn run_voice_loop(mut state: VoiceLoop<'_>) -> Result<(), String> {
                     &mut state.orchestrator_bridge,
                     &state.orchestrator_jobs,
                     &mut response_active,
+                    &mut current_item_id,
+                    &mut enqueued_assistant_ms,
                     Arc::clone(&state.playback),
                     state.output_rate,
                 )
@@ -257,20 +287,41 @@ async fn handle_realtime_event(
     orchestrator_bridge: &mut OrchestratorBridge,
     orchestrator_jobs: &OrchestratorJobManager,
     response_active: &mut bool,
+    current_item_id: &mut Option<String>,
+    enqueued_assistant_ms: &mut u64,
     playback: Arc<Mutex<PlaybackBuffer>>,
     output_rate: u32,
 ) -> Result<Vec<serde_json::Value>, String> {
     let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let mut emitted: Vec<serde_json::Value> = Vec::new();
     match event_type {
         "session.created" | "session.updated" => {
             eprintln!("realtime event: {event_type}");
         }
         "response.created" => {
             *response_active = true;
+            *current_item_id = None;
+            *enqueued_assistant_ms = 0;
             eprintln!("realtime event: response.created");
+        }
+        "response.output_item.added" => {
+            // Capture the assistant message item id so we can truncate it
+            // accurately on barge-in. Only the first audio-bearing item per
+            // response is tracked; subsequent items in the same response
+            // overwrite (the most recently active item is what would be
+            // mid-flight when the user speaks).
+            if let Some(id) = value
+                .get("item")
+                .and_then(|item| item.get("id"))
+                .and_then(|id| id.as_str())
+            {
+                *current_item_id = Some(id.to_string());
+            }
         }
         "response.done" => {
             *response_active = false;
+            *current_item_id = None;
+            *enqueued_assistant_ms = 0;
             eprintln!(
                 "realtime event: response.done playback_depth_ms={}",
                 playback_depth_ms(&playback, output_rate).unwrap_or(0)
@@ -278,7 +329,37 @@ async fn handle_realtime_event(
         }
         "response.output_audio.delta" | "response.audio.delta" => {
             if let Some(delta) = value.get("delta").and_then(|v| v.as_str()) {
-                enqueue_audio_delta(delta, playback, output_rate)?;
+                let samples_24k = enqueue_audio_delta(delta, Arc::clone(&playback), output_rate)?;
+                // 24 kHz mono: 24 samples == 1 ms.
+                let delta_ms = (samples_24k / 24) as u64;
+                *enqueued_assistant_ms = enqueued_assistant_ms.saturating_add(delta_ms);
+            }
+        }
+        "input_audio_buffer.speech_started" => {
+            // Server-side VAD detected user speech. If the assistant is
+            // mid-response, cancel it, mark the played duration on the
+            // assistant item, and drop any audio still in the local buffer
+            // so the user hears their barge-in immediately.
+            if *response_active {
+                let remaining_ms = playback_depth_ms(&playback, output_rate).unwrap_or(0) as u64;
+                let played_ms = enqueued_assistant_ms.saturating_sub(remaining_ms);
+                eprintln!(
+                    "realtime barge-in: speech_started enqueued_ms={} remaining_ms={} played_ms={}",
+                    enqueued_assistant_ms, remaining_ms, played_ms
+                );
+                emitted.push(json!({ "type": "response.cancel" }));
+                if let Some(item_id) = current_item_id.take() {
+                    emitted.push(json!({
+                        "type": "conversation.item.truncate",
+                        "item_id": item_id,
+                        "content_index": 0,
+                        "audio_end_ms": played_ms,
+                    }));
+                }
+                clear_playback(&playback);
+                // Keep response_active=true until the server confirms the
+                // cancellation with response.done; that's our source of
+                // truth for "the assistant turn is over".
             }
         }
         "error" => {
@@ -286,7 +367,9 @@ async fn handle_realtime_event(
         }
         _ => {}
     }
-    orchestrator_bridge
+    let mut bridge_events = orchestrator_bridge
         .handle_realtime_event(&value, orchestrator_jobs)
-        .await
+        .await?;
+    emitted.append(&mut bridge_events);
+    Ok(emitted)
 }
