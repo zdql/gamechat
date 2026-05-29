@@ -20,6 +20,19 @@ use std::sync::Arc;
 
 // ── Interface types ─────────────────────────────────────────────────────
 
+/// Provider-specific transformation applied to each raw line emitted by a
+/// backend's child process (`stdout` or `stderr`) before it lands in the
+/// progress buffer.
+///
+/// Returning `Some(cleaned)` pushes the cleaned form; returning `None` drops
+/// the line entirely. The cleaned buffer is what the summarizer LLM sees, so
+/// implementations should strip wire noise (e.g. raw JSON envelopes) and keep
+/// human-readable signal (assistant text, tool calls, final results).
+///
+/// Implemented as a `fn` pointer rather than a closure so call sites can
+/// hand the cleaner across `tokio::spawn` boundaries without an `Arc`.
+pub(crate) type CleanLogLine = fn(line: &str, stream: &str) -> Option<String>;
+
 /// Reply produced by a single round-trip with the background agent.
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct SendResult {
@@ -50,6 +63,10 @@ pub(crate) struct ToolCallInfo {
 pub(crate) trait Provider: Send + Sync {
     /// Stable name used in logs and progress events.
     fn name(&self) -> &'static str;
+
+    /// Backend-specific log-line cleaner used by the shared stream reader.
+    /// See [`CleanLogLine`].
+    fn clean_log_line(&self) -> CleanLogLine;
 
     /// Spawn a new session keyed to `slug`. Callers that reuse a slug expect
     /// the provider to route them back into the same logical conversation if
@@ -158,5 +175,34 @@ impl OrchestratorSession {
         self.inner
             .send_message_until_done_for_job(job_id, message, progress)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each provider's cleaner is exposed via the trait so live stream
+    /// readers consume the configured implementation rather than reaching
+    /// past the abstraction.
+    #[test]
+    fn claude_provider_returns_stream_json_cleaner() {
+        let provider = OrchestratorProvider::claude(None, None);
+        let cleaner = provider.inner.clean_log_line();
+        let init = r#"{"type":"system","subtype":"init","session_id":"abc"}"#;
+        assert_eq!(cleaner(init, "stdout"), None);
+        let turn = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}"#;
+        assert_eq!(cleaner(turn, "stdout"), Some("assistant: hello".to_string()));
+    }
+
+    #[test]
+    fn codex_provider_returns_passthrough_cleaner() {
+        let provider = OrchestratorProvider::openai(None, None);
+        let cleaner = provider.inner.clean_log_line();
+        assert_eq!(
+            cleaner("running tests", "stdout"),
+            Some("running tests".to_string())
+        );
+        assert_eq!(cleaner("   ", "stdout"), None);
     }
 }
