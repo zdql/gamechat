@@ -5,9 +5,15 @@ use std::path::{Path, PathBuf};
 // Default voice if neither the chosen preset nor the user's settings override it.
 pub(crate) const DEFAULT_VOICE: &str = "marin";
 
+// Floor/ceiling for the auto-reset threshold. The floor avoids pathological
+// configs that would reset on every response; the ceiling matches the rough
+// point where Realtime context starts to drift on long sessions.
+pub(crate) const MIN_AUTO_RESET_THRESHOLD: usize = 20;
+pub(crate) const MAX_AUTO_RESET_THRESHOLD: usize = 2000;
+
 // The orchestrator-aware base prompt. Personas are appended to this so every
 // preset still knows how to delegate work and check progress.
-pub(super) const BASE_INSTRUCTIONS: &str = "You are a realtime voice frontend. Keep the spoken conversation moving. When the user asks for work that benefits from deeper reasoning, tools, files, research, or multi-step execution, call delegate_to_orchestrator. Always include a stable snake_case slug that names what the background agent will do, such as refactor_docs. Reuse the same slug to continue that background conversation; use a new slug for unrelated work. If the user asks how background work is going, call sub_agent_progress with that slug and read the returned summary aloud. When the user asks something specific (\"is it done?\", \"did it find the bug?\"), pass it through as the question argument so the summary answers it. Call sub_agent_progress sparingly: only when the user asks or when you need material to fill a silence, and never twice in a row within a few seconds. If the response has rate_limited=true, wait retry_after_seconds before calling again. Do not pretend the background work is done until the orchestrator returns an update or sub_agent_progress reports status=completed.";
+pub(super) const BASE_INSTRUCTIONS: &str = "You are a realtime voice frontend. Keep the spoken conversation moving. When the user asks for work that benefits from deeper reasoning, tools, files, research, or multi-step execution, call delegate_to_orchestrator. Always include a stable snake_case slug that names what the background agent will do, such as refactor_docs. Reuse the same slug to continue that background conversation; use a new slug for unrelated work. If the user asks how background work is going, call sub_agent_progress with that slug and read the returned summary aloud. When the user asks something specific (\"is it done?\", \"did it find the bug?\"), pass it through as the question argument so the summary answers it. Call sub_agent_progress sparingly: only when the user asks or when you need material to fill a silence, and never twice in a row within a few seconds. If the response has rate_limited=true, wait retry_after_seconds before calling again. Do not pretend the background work is done until the orchestrator returns an update or sub_agent_progress reports status=completed. If the conversation has grown long and you sense the model is losing track of recent context, call reset_voice_context with a short reason (\"context_overload\" or \"user_requested\"). The reset is silent to the user — keep speaking immediately afterward as if nothing happened.";
 
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct Settings {
@@ -23,6 +29,17 @@ pub(crate) struct Settings {
     /// User-defined presets. Override built-ins of the same name.
     #[serde(default)]
     pub presets: HashMap<String, Preset>,
+    /// Auto-trigger a voice context reset once the number of tracked
+    /// conversation items reaches this value. Omit or set to 0 to disable.
+    /// Clamped to [`MIN_AUTO_RESET_THRESHOLD`, `MAX_AUTO_RESET_THRESHOLD`]
+    /// when non-zero.
+    #[serde(default)]
+    pub auto_reset_after_items: Option<usize>,
+    /// When true (default), the voice loop scans the runtime dir at boot for
+    /// other live gamechat instances and records their active sub-agent
+    /// slugs so the orchestrator and operators can see prior background work.
+    #[serde(default)]
+    pub discover_existing_subagents: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -33,10 +50,15 @@ pub(crate) struct Preset {
     pub persona: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct ResolvedVoiceSettings {
     pub voice: String,
     pub instructions: String,
+    /// Item count that triggers an auto-reset. 0 means disabled.
+    pub auto_reset_after_items: usize,
+    /// Whether the voice loop should probe other gamechat instances for
+    /// their active sub-agent slugs at startup.
+    pub discover_existing_subagents: bool,
 }
 
 pub(crate) fn builtin_presets() -> HashMap<String, Preset> {
@@ -173,9 +195,17 @@ impl Settings {
             format!("{BASE_INSTRUCTIONS}\n\n{}", persona.trim())
         };
 
+        let auto_reset_after_items = match self.auto_reset_after_items {
+            Some(0) | None => 0,
+            Some(n) => n.clamp(MIN_AUTO_RESET_THRESHOLD, MAX_AUTO_RESET_THRESHOLD),
+        };
+        let discover_existing_subagents = self.discover_existing_subagents.unwrap_or(true);
+
         Ok(ResolvedVoiceSettings {
             voice,
             instructions,
+            auto_reset_after_items,
+            discover_existing_subagents,
         })
     }
 }
@@ -225,6 +255,8 @@ mod tests {
             preset: Some("jarvis".to_string()),
             persona: None,
             presets: HashMap::new(),
+            auto_reset_after_items: None,
+            discover_existing_subagents: None,
         };
         let resolved = settings.resolve(None, None).unwrap();
         assert_eq!(resolved.voice, "echo");
@@ -245,6 +277,8 @@ mod tests {
             preset: Some("jarvis".to_string()),
             persona: None,
             presets,
+            auto_reset_after_items: None,
+            discover_existing_subagents: None,
         };
         let resolved = settings.resolve(None, None).unwrap();
         assert_eq!(resolved.voice, "alloy");
@@ -258,11 +292,75 @@ mod tests {
             preset: Some("jarvis".to_string()),
             persona: Some("Just be a robot.".to_string()),
             presets: HashMap::new(),
+            auto_reset_after_items: None,
+            discover_existing_subagents: None,
         };
         let resolved = settings.resolve(None, None).unwrap();
         assert_eq!(resolved.voice, "cedar");
         assert!(resolved.instructions.ends_with("Just be a robot."));
         assert!(!resolved.instructions.contains("JARVIS"));
+    }
+
+    #[test]
+    fn auto_reset_zero_disables() {
+        let settings = Settings {
+            voice: None,
+            preset: None,
+            persona: None,
+            presets: HashMap::new(),
+            auto_reset_after_items: Some(0),
+            discover_existing_subagents: None,
+        };
+        let resolved = settings.resolve(None, None).unwrap();
+        assert_eq!(resolved.auto_reset_after_items, 0);
+    }
+
+    #[test]
+    fn auto_reset_clamped_below_minimum() {
+        let settings = Settings {
+            voice: None,
+            preset: None,
+            persona: None,
+            presets: HashMap::new(),
+            auto_reset_after_items: Some(3),
+            discover_existing_subagents: None,
+        };
+        let resolved = settings.resolve(None, None).unwrap();
+        assert_eq!(resolved.auto_reset_after_items, MIN_AUTO_RESET_THRESHOLD);
+    }
+
+    #[test]
+    fn auto_reset_clamped_above_maximum() {
+        let settings = Settings {
+            voice: None,
+            preset: None,
+            persona: None,
+            presets: HashMap::new(),
+            auto_reset_after_items: Some(100_000),
+            discover_existing_subagents: None,
+        };
+        let resolved = settings.resolve(None, None).unwrap();
+        assert_eq!(resolved.auto_reset_after_items, MAX_AUTO_RESET_THRESHOLD);
+    }
+
+    #[test]
+    fn discovery_defaults_to_enabled() {
+        let resolved = Settings::default().resolve(None, None).unwrap();
+        assert!(resolved.discover_existing_subagents);
+    }
+
+    #[test]
+    fn discovery_can_be_disabled() {
+        let settings = Settings {
+            voice: None,
+            preset: None,
+            persona: None,
+            presets: HashMap::new(),
+            auto_reset_after_items: None,
+            discover_existing_subagents: Some(false),
+        };
+        let resolved = settings.resolve(None, None).unwrap();
+        assert!(!resolved.discover_existing_subagents);
     }
 
     #[test]

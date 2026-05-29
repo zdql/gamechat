@@ -1,6 +1,8 @@
-//! Client side of the control protocol — used by the `inspect`, `tail`, and
-//! `open` subcommands. Connects to a Unix socket and prints results.
+//! Client side of the control protocol — used by the `inspect`, `tail`,
+//! `open`, `reset`, and `discover` subcommands. Connects to a Unix socket
+//! and prints results.
 
+use super::discovery::discover_existing_subagents;
 use super::protocol::{Request, Response};
 use super::runtime_dir::{discover_sockets, socket_path_for_pid};
 use super::{ControlSubcommand, ControlTarget};
@@ -15,11 +17,18 @@ pub(super) async fn run(
     subcommand: ControlSubcommand,
     target: ControlTarget,
 ) -> Result<(), String> {
+    // `discover` doesn't talk to a single instance — it surveys the whole
+    // runtime dir — so resolve the socket lazily for the other subcommands.
+    if let ControlSubcommand::Discover = subcommand {
+        return run_discover().await;
+    }
     let socket = resolve_socket(&target)?;
     match subcommand {
         ControlSubcommand::Inspect => run_inspect(&socket).await,
         ControlSubcommand::Tail { slug } => run_tail(&socket, &slug).await,
         ControlSubcommand::Open { slug, launch } => run_open(&socket, &slug, launch).await,
+        ControlSubcommand::Reset { reason } => run_reset(&socket, reason).await,
+        ControlSubcommand::Discover => unreachable!(),
     }
 }
 
@@ -152,6 +161,53 @@ async fn run_tail(socket: &Path, slug: &str) -> Result<(), String> {
         }
         sleep(Duration::from_millis(750)).await;
     }
+}
+
+async fn run_reset(socket: &Path, reason: Option<String>) -> Result<(), String> {
+    let resp = send_request(socket, Request::Reset { reason: reason.clone() }).await?;
+    match resp {
+        Response::Reset { dispatched } => {
+            if dispatched {
+                println!(
+                    "reset signal dispatched to {} (reason={})",
+                    socket.display(),
+                    reason.as_deref().unwrap_or("unspecified")
+                );
+            } else {
+                return Err(format!(
+                    "voice loop reset channel is closed; reset NOT applied (socket {})",
+                    socket.display()
+                ));
+            }
+            Ok(())
+        }
+        Response::Error { message } => Err(message),
+        other => Err(format!("unexpected response: {other:?}")),
+    }
+}
+
+async fn run_discover() -> Result<(), String> {
+    let discovered = discover_existing_subagents().await;
+    if discovered.is_empty() {
+        println!("(no other live gamechat instances expose any sub-agents)");
+        return Ok(());
+    }
+    println!(
+        "{:<8} {:<24} {:<10} {:<9} {:>9}  {}",
+        "PEER", "SLUG", "PROVIDER", "STATUS", "ELAPSED", "LAST"
+    );
+    for entry in discovered {
+        println!(
+            "{:<8} {:<24} {:<10} {:<9} {:>8}s  {}",
+            entry.pid,
+            truncate_for_table(&entry.summary.slug, 24),
+            truncate_for_table(&entry.summary.provider, 10),
+            status_label(entry.summary.status),
+            entry.summary.elapsed_seconds.round() as u64,
+            truncate_for_table(&entry.summary.last_message, 60),
+        );
+    }
+    Ok(())
 }
 
 async fn run_open(socket: &Path, slug: &str, launch: bool) -> Result<(), String> {
