@@ -10,8 +10,9 @@
 //! - `jobs`   — slug-keyed work queue running on one session per slug.
 //! - `progress` — shared snapshot store for `sub_agent_progress` polling.
 //! - `shared` — cross-provider helpers (log formatting, stdio streaming).
-//! - `claude/`, `openai/` — provider backends. Each folder is self-contained
-//!   and only exposes its `Provider` type to `interface`.
+//! - `types`  — tool-call argument/result types exchanged with the voice model.
+//! - `agents/` — provider backends (`claude/`, `openai/`). Each folder is
+//!   self-contained and only exposes its `Provider` type to `interface`.
 //!
 //! The rest of the voice app imports only the items re-exported below.
 
@@ -20,12 +21,13 @@ pub(crate) mod interface;
 pub(crate) mod jobs;
 pub(crate) mod progress;
 pub(crate) mod summarizer;
+pub(crate) mod types;
 
-mod claude;
-mod openai;
+mod agents;
 mod shared;
 
 pub(crate) use bridge::OrchestratorBridge;
 pub(crate) use interface::OrchestratorProvider;
 pub(crate) use jobs::OrchestratorJobManager;
 pub(crate) use summarizer::OpenAiSummarizer;
+pub(crate) use types::{DelegateToOrchestratorArgs, VoiceUpdate};

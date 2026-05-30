@@ -1,7 +1,7 @@
 use crate::orchestrator::interface::OrchestratorProvider;
 use crate::orchestrator::progress::{ProgressReporter, ProgressSnapshot, ProgressStore};
 use crate::orchestrator::shared::preview;
-use crate::types::DelegateToOrchestratorArgs;
+use crate::orchestrator::types::DelegateToOrchestratorArgs;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;

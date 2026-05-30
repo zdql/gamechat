@@ -8,11 +8,10 @@
 //! - [`SendResult`] / [`ToolCallInfo`] — values flowing back to callers.
 //! - [`Provider`] / [`Session`] — the traits each backend implements.
 //!
-//! Provider crates (`claude/`, `openai/`) implement the traits; the rest of
-//! the app depends only on this interface.
+//! Provider crates (`agents/claude/`, `agents/openai/`) implement the traits;
+//! the rest of the app depends only on this interface.
 
-use crate::orchestrator::claude::ClaudeProvider;
-use crate::orchestrator::openai::OpenAiProvider;
+use crate::orchestrator::agents::{ClaudeProvider, OpenAiProvider};
 use crate::orchestrator::progress::ProgressReporter;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
