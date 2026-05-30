@@ -1,12 +1,10 @@
 mod control;
 mod orchestrator;
-mod types;
 mod voice_loop;
 
 use control::{ControlSubcommand, ControlTarget};
-use orchestrator::OrchestratorProvider;
+use orchestrator::{DelegateToOrchestratorArgs, OrchestratorProvider, VoiceUpdate};
 use std::path::PathBuf;
-use types::{DelegateToOrchestratorArgs, VoiceUpdate};
 use voice_loop::settings::Settings;
 
 #[tokio::main]
