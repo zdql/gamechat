@@ -22,7 +22,7 @@ Voice-driven supervisor for [Claude Code] and [Codex]. You talk to a low-latency
 
 ## Architecture
 
-There is exactly **one realtime voice loop**, an **async worker pool** for background agent jobs, and a tiny **control plane** that exposes job state to other terminals. Three concerns, three modules.
+There is exactly **one realtime voice loop**, an **async worker pool** for background agent jobs, and a tiny **control plane** that exposes job state to other terminals. 
 
 ### The voice loop (`src/voice_loop/`)
 
